@@ -26,7 +26,7 @@ typedef struct
     size_t capacity;
 } hash_table_t;
 
-struct config
+struct config_t
 {
     char *forward_files[MAX_FILES];
     char *reverse_files[MAX_FILES];
@@ -162,7 +162,7 @@ void print_usage(char *program_name)
     fprintf(stderr, "Usage: %s --forward [--forward ...] --reverse [--reverse ...] --ksize --depth [--coverage] [--verbose] [--filetype|-t fq|fa]\n", program_name);
 }
 
-int parse_arguments(int argc, char *argv[], struct config *cfg)
+int parse_arguments(int argc, char *argv[], struct config_t *cfg)
 {
     cfg->coverage = 0.9;
     cfg->verbose = 0;
@@ -229,7 +229,7 @@ int parse_arguments(int argc, char *argv[], struct config *cfg)
 int main(int argc, char *argv[])
 {
     setlocale(LC_ALL, "");
-    struct config cfg = {0};
+    struct config_t cfg = {0};
     if (!parse_arguments(argc, argv, &cfg))
     {
         print_usage(argv[0]);

@@ -12,18 +12,40 @@
 #include <getopt.h>
 #include <stdbool.h>
 
+/// registry of allocs (malloc realloc calloc)
+// output_filename
+// hash_table_t
+// hash_table_t->entries
+// forward_ptr
+// reverse_ptr
+// cfg.forward_files
+// cfg.reverse_files
+
 // TODO: provide an option to store kmers canonically. it would have tye memory needed too
 
 // fix memory.leak when new file is rewd
 
-// #define INITIAL_CAPACITY 500000003 // equiv genome/transcriptome size; should be a prime number; remember we do not convert to canonical kmers (as this was create for rnaseq)
-#define INITIAL_CAPACITY 150000001 // good starting value for a transcriptome, esp if stranded
+// #define INITIAL_CAPACITY 500000003 // 7.5gb per cpu equiv genome/transcriptome size; should be a prime number; remember we do not convert to canonical kmers (as this was create for rnaseq)
+#define INITIAL_CAPACITY 150000001 // 2.3gb good starting value for a transcriptome, esp if stranded
 #define MAX_SEQ_LENGTH 400
 #define CHUNK_SIZE 1000000
 #define MAX_THREADS 256
 #define SYNC_INTERVAL 100000 // how many seqs/often to sync the kmer tables of each thread, this inits the thread-specific sync interval which increases with more data.
 
-typedef struct hash_table_t hash_table_t;
+// 16 (8+4+4padding) bytes per entry
+typedef struct
+{
+    uint64_t hash;
+    int count;
+} kmer_t;
+
+typedef struct hash_table_t
+{
+    kmer_t *entries;
+    size_t size;
+    size_t capacity;
+} hash_table_t;
+hash_table_t global_hash_table;
 
 typedef struct
 {
@@ -49,31 +71,19 @@ typedef struct
 thread_data_t thread_data[MAX_THREADS];
 
 pthread_mutex_t hash_table_mutex = PTHREAD_MUTEX_INITIALIZER;
-// pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t sync_table_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t reporting_data = PTHREAD_MUTEX_INITIALIZER;
 
-typedef struct
-{
-    uint64_t hash;
-    int count;
-} kmer_t;
-
-struct hash_table_t
-{
-    kmer_t *entries;
-    size_t size;
-    size_t capacity;
-};
-
-struct reporting
+struct reporting_t
 {
     size_t total_processed;
     size_t total_printed;
     size_t total_skipped;
     size_t total_kmers;
-};
+    int files_processed;
+} reporting;
 
-struct config
+struct config_t
 {
     char **forward_files;
     int forward_file_count;
@@ -87,6 +97,7 @@ struct config
     int cpus;
     int help;
     int debug;
+    size_t initial_hash_size;
 } cfg;
 
 typedef struct
@@ -103,23 +114,25 @@ static const uint8_t base_map[256] = {
 
 // Function prototypes
 void init_hash_table(hash_table_t *ht);
-void expand_global_hash_table(hash_table_t *ht, size_t new_capacity, int thread_id);
-void expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread_id);
+size_t expand_global_hash_table(size_t new_capacity, int thread_id, bool nolock);
+size_t expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread_id);
 static inline uint64_t kmer_hash(const char *seq, int k);
 char *create_output_filename(const char *basename, int k, int norm_depth, int thread);
-int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap, hash_table_t *hash_table);
-int find_or_insert_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id);
+int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
+int store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id);
 void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id);
 void print_usage(char *program_name);
 int parse_arguments(int argc, char *argv[]);
 mmap_file_t mmap_file(const char *filename);
 void munmap_file(mmap_file_t *mf);
-void synchronise_hash_tables(hash_table_t *local_ht, hash_table_t *global_ht, int thread_id);
+void synchronise_hash_tables(hash_table_t *local_ht, int thread_id);
 void *process_thread_chunk(void *arg);
 bool valid_dna(const char *sequence);
 char *read_line(char *ptr, char *buffer, int max_length);
 static void replacestr(const char *line, const char *search, const char *replace);
 char *find_next_record_start(char *ptr, char *end_ptr, char stop_char);
+hash_table_t *copy_hash_table(const hash_table_t *source);
+float capacity2memory(size_t *capacity);
 
 ////////////////
 char *read_line(char *ptr, char *buffer, int max_length)
@@ -242,6 +255,7 @@ int parse_arguments(int argc, char *argv[])
     cfg.reverse_files = NULL;
     cfg.ksize = 25;
     cfg.depth = 100;
+    cfg.initial_hash_size = INITIAL_CAPACITY;
 
     static struct option long_options[] = {
         {"forward", required_argument, 0, 'f'},
@@ -251,6 +265,7 @@ int parse_arguments(int argc, char *argv[])
         {"coverage", required_argument, 0, 'g'},
         {"filetype", required_argument, 0, 't'},
         {"cpu", required_argument, 0, 'p'},
+        {"memory", required_argument, 0, 'm'},
         {"debug", required_argument, 0, 'b'},
         {"verbose", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
@@ -259,10 +274,15 @@ int parse_arguments(int argc, char *argv[])
     int opt;
     int option_index = 0;
 
-    while ((opt = getopt_long(argc, argv, "f:r:k:d:g:t:p:b:vh", long_options, &option_index)) != -1)
+    while ((opt = getopt_long(argc, argv, "f:r:k:d:g:t:p:m:b:vh", long_options, &option_index)) != -1)
     {
         switch (opt)
         {
+        case 'm':
+            cfg.initial_hash_size = atoi(optarg);
+            float memory_use = cfg.initial_hash_size * 16 / 1073741824;
+            printf("Hash table size set to %'zu (memory ~ %'.2f gb per THREAD/CPU)\n", cfg.initial_hash_size, memory_use);
+            break;
         case 'b':
             cfg.debug = atoi(optarg);
             break;
@@ -271,43 +291,21 @@ int parse_arguments(int argc, char *argv[])
             return 0;
         case 'p':
             cfg.cpus = atoi(optarg);
-            if (cfg.cpus <= 0)
-            {
-                fprintf(stderr, "Error: CPU count must be a positive integer\n");
-                return 0;
-            }
             break;
         case 'f':
             process_forward_files(optarg, &argv[optind]);
-
             break;
         case 'r':
             process_reverse_files(optarg, &argv[optind]);
-
             break;
         case 'k':
             cfg.ksize = atoi(optarg);
-            if (cfg.ksize < 5 || cfg.ksize > 32)
-            {
-                fprintf(stderr, "Error: Only kmer sizes of 5 to 32 are supported\n");
-                return 0;
-            }
             break;
         case 'd':
             cfg.depth = atoi(optarg);
-            if (cfg.depth <= 1)
-            {
-                fprintf(stderr, "Error: Depth is the number of times a kmer needs to be found before being flagged as high coverage, it must be above 1\n");
-                return 0;
-            }
             break;
         case 'g':
             cfg.coverage = atof(optarg);
-            if (cfg.coverage > 1)
-            {
-                fprintf(stderr, "Error: Coverage is the proportion of the sequence covered by high kmers and must be between 0 and 1\n");
-                return 0;
-            }
             break;
         case 'v':
             cfg.verbose = 1;
@@ -356,78 +354,168 @@ int parse_arguments(int argc, char *argv[])
         fprintf(stderr, "Error: Number of forward and reverse files must match\n");
         return 0;
     }
+    if (cfg.cpus <= 0)
+    {
+        fprintf(stderr, "Error: CPU count must be a positive integer\n");
+        return 0;
+    }
+    if (cfg.ksize < 5 || cfg.ksize > 32)
+    {
+        fprintf(stderr, "Error: Only kmer sizes of 5 to 32 are supported\n");
+        return 0;
+    }
+    if (cfg.coverage > 1)
+    {
+        fprintf(stderr, "Error: Coverage is the proportion of the sequence covered by high kmers and must be between 0 and 1\n");
+        return 0;
+    }
+    if (cfg.depth <= 1)
+    {
+        fprintf(stderr, "Error: Depth is the number of times a kmer needs to be found before being flagged as high coverage, it must be above 1\n");
+        return 0;
+    }
+    if (cfg.initial_hash_size < 100000)
+    {
+        fprintf(stderr, "Error: initial kmer table size is too small, it should be set to at least 100000 (or leave empty for default)\n");
+        return 0;
+    }
 
     return 1;
 }
 
 //////////////////////////////
-
+float capacity2memory(size_t *capacity)
+{
+    float number = (float)*capacity;
+    return number * 16 / 1073741824;
+}
 
 void init_hash_table(hash_table_t *ht)
 {
     pthread_mutex_lock(&hash_table_mutex);
-    ht->entries = calloc(INITIAL_CAPACITY, sizeof(kmer_t));
+    ht->entries = calloc(cfg.initial_hash_size, sizeof(kmer_t));
     if (!ht->entries)
     {
         fprintf(stderr, "Memory allocation failed\n");
+        pthread_mutex_unlock(&hash_table_mutex);
         exit(EXIT_FAILURE);
     }
     ht->size = 0;
-    ht->capacity = INITIAL_CAPACITY;
+    ht->capacity = cfg.initial_hash_size;
     pthread_mutex_unlock(&hash_table_mutex);
 }
 
-void expand_global_hash_table(hash_table_t *ht, size_t new_capacity, int thread_id)
+hash_table_t *copy_hash_table(const hash_table_t *source)
 {
-    if (!new_capacity || new_capacity == 0)
-        new_capacity = ht->capacity + ht->capacity * 0.5; // increase by 50%
-
-    if (ht->capacity >= new_capacity)
-        return;
-
     pthread_mutex_lock(&hash_table_mutex);
-    if (cfg.debug)
-        printf("Thread %d: Global hash table expansion triggered, from %'zu to %'zu\n", thread_id, ht->capacity, new_capacity);
-
-    kmer_t *new_entries = calloc(new_capacity, sizeof(kmer_t));
-    if (!new_entries)
+    hash_table_t *copy = malloc(sizeof(hash_table_t));
+    if (!copy)
     {
-        fprintf(stderr, "Error: Thread %d: Memory allocation failed to expand global hash table, from %'zu to %'zu\n", thread_id, ht->capacity, new_capacity);
+        fprintf(stderr, "Memory allocation failed\n");
+        pthread_mutex_unlock(&hash_table_mutex);
         exit(EXIT_FAILURE);
     }
-
+    copy->capacity = source->capacity;
+    copy->size = source->size;
+    copy->entries = calloc(copy->capacity, sizeof(kmer_t));
+    if (!copy->entries)
+    {
+        fprintf(stderr, "Memory allocation failed\n");
+        free(copy);
+        pthread_mutex_unlock(&hash_table_mutex);
+        exit(EXIT_FAILURE);
+    }
+    memcpy(copy->entries, source->entries, copy->capacity * sizeof(kmer_t));
+    pthread_mutex_unlock(&hash_table_mutex);
+    return copy;
+}
+bool is_hash_table_empty(const hash_table_t *ht)
+{
     for (size_t i = 0; i < ht->capacity; i++)
     {
         if (ht->entries[i].hash != 0)
         {
-            size_t new_index = ht->entries[i].hash % new_capacity;
+            return false;
+        }
+    }
+    return true;
+}
+size_t expand_global_hash_table(size_t new_capacity, int thread_id, bool nolock)
+{
+
+    if (!new_capacity || new_capacity == 0)
+        new_capacity = global_hash_table.capacity + global_hash_table.capacity * 0.5; // increase by 50%
+
+    if (global_hash_table.capacity >= new_capacity)
+    {
+        return global_hash_table.capacity;
+    }
+
+    if (cfg.debug)
+    {
+        printf("Thread %d: Global hash table expansion triggered, from %'zu to %'zu\n", thread_id, global_hash_table.capacity, new_capacity);
+    }
+
+    kmer_t *new_entries = calloc(new_capacity, sizeof(kmer_t));
+    if (!new_entries)
+    {
+        fprintf(stderr, "Error: Thread %d: Memory allocation failed to expand global hash table, from %'zu to %'zu\n", thread_id, global_hash_table.capacity, new_capacity);
+        exit(EXIT_FAILURE);
+    }
+
+    size_t new_global_hash_size = 0; // not necessary but Just In Case (TM)
+
+    if (nolock == false)
+        pthread_mutex_lock(&hash_table_mutex);
+
+    for (size_t i = 0; i < global_hash_table.capacity; i++)
+    {
+        if (global_hash_table.entries[i].hash != 0)
+        {
+            // kmer is stored at an index based on its capacity so when that increases, indexes change
+            size_t new_index = global_hash_table.entries[i].hash % new_capacity;
             while (new_entries[new_index].hash != 0)
             {
                 new_index = (new_index + 1) % new_capacity;
             }
-            new_entries[new_index] = ht->entries[i];
+            new_entries[new_index] = global_hash_table.entries[i];
+
+            new_global_hash_size++;
         }
     }
 
-    free(ht->entries);
-    ht->entries = new_entries;
-    ht->capacity = new_capacity;
+    if (global_hash_table.entries)
+        free(global_hash_table.entries);
 
-    if (ht->size >= ht->capacity * 0.90)
+    global_hash_table.entries = new_entries;
+    global_hash_table.capacity = new_capacity;
+    global_hash_table.size = new_global_hash_size;
+
+    if (new_global_hash_size >= new_capacity * 0.90)
     {
-        fprintf(stderr, "Warning: Thread %d: Global hash table is still over 90%% full after expansion (%'zu)\n", thread_id, ht->size);
+        fprintf(stderr, "Warning: Thread %d: Global hash table is still over 90%% full after expansion (%'zu)\n", thread_id, new_global_hash_size);
     }
 
     if (cfg.debug)
-        printf("Thread %d: Global hash table expansion completed successfully, using %'zu of %'zu new_capacity\n", thread_id, ht->size, ht->capacity);
+        printf("Thread %d: Global hash table expansion completed successfully, using %'zu (mem: %'.2f) of %'zu new capacity (mem: %'.2f)\n", thread_id, new_global_hash_size, capacity2memory(&new_global_hash_size), new_capacity, capacity2memory(&new_capacity));
 
-    pthread_mutex_unlock(&hash_table_mutex);
+    if (nolock == false)
+        pthread_mutex_unlock(&hash_table_mutex);
+
+    return global_hash_table.capacity;
 }
 
-void expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread_id)
+size_t expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread_id)
 {
     if (!new_capacity || new_capacity == 0)
         new_capacity = ht->capacity + ht->capacity * 0.5;
+
+    if (ht->capacity >= new_capacity)
+    {
+        return ht->capacity;
+    }
+
+    size_t new_hash_size = 0; // not necessary but Just In Case (TM)
 
     if (cfg.debug)
         printf("Thread %d: Local hash table expansion triggered, from %'zu to %'zu\n", thread_id, ht->capacity, new_capacity);
@@ -443,18 +531,23 @@ void expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread_i
     {
         if (ht->entries[i].hash != 0)
         {
+            // kmer is stored at an index based on its capacity so when that increases, indexes change
             size_t new_index = ht->entries[i].hash % new_capacity;
             while (new_entries[new_index].hash != 0)
             {
                 new_index = (new_index + 1) % new_capacity;
             }
             new_entries[new_index] = ht->entries[i];
+            new_hash_size++;
         }
     }
 
-    free(ht->entries);
+    if (ht->entries)
+        free(ht->entries);
+
     ht->entries = new_entries;
     ht->capacity = new_capacity;
+    ht->size = new_hash_size;
 
     if (ht->size >= ht->capacity * 0.90)
     {
@@ -462,7 +555,9 @@ void expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread_i
     }
 
     if (cfg.debug)
-        printf("Thread %d: Local hash table expansion completed successfully, using %'zu of %'zu new_capacity\n", thread_id, ht->size, ht->capacity);
+        printf("Thread %d: Local hash table expansion completed successfully, using %'zu (mem: %'.2f) of %'zu new capacity (mem: %'.2f)\n", thread_id, ht->size, capacity2memory(&ht->size), ht->capacity, capacity2memory(&ht->capacity));
+
+    return ht->capacity;
 }
 
 static inline uint64_t kmer_hash(const char *seq, int k)
@@ -488,7 +583,7 @@ char *create_output_filename(const char *basename, int k, int norm_depth, int th
     return output_filename;
 }
 
-int find_or_insert_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
+int store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
 {
     // this happens locally on a thread specific hash_table so no requirement to do any locking
 
@@ -508,10 +603,11 @@ int find_or_insert_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
             if (cfg.debug)
                 printf("hash table is full at index %'zu. This shouldn't happen really but will try to increase it.\n", index);
             expand_local_hash_table(hash_table, 0, thread_id);
-            return find_or_insert_kmer(hash_table, hash, thread_id);
+            return store_kmer(hash_table, hash, thread_id);
         }
     }
 
+    // new kmer inserted, so increase size.
     if (hash_table->entries[index].hash == 0)
     {
         hash_table->entries[index].hash = hash;
@@ -541,7 +637,7 @@ void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM
                 continue;
 
             (*total_seq_kmers)++;
-            int index = find_or_insert_kmer(hash_table, hash, thread_id);
+            int index = store_kmer(hash_table, hash, thread_id);
 
             if (hash_table->entries[index].count >= NORM_DEPTH)
             {
@@ -634,13 +730,12 @@ bool valid_dna(const char *sequence)
 
 void *process_thread_chunk(void *arg)
 {
-
     thread_data_t *data = (thread_data_t *)arg;
     char *forward_ptr = data->forward_ptr;
     char *reverse_ptr = data->reverse_ptr;
     size_t forward_size = data->forward_size;
     size_t reverse_size = data->reverse_size;
-    hash_table_t *hash_table = data->hash_table;
+    hash_table_t *local_hash_table = data->hash_table;
     int thread_id = data->thread_id;
     FILE *output_forward = data->thread_output_forward;
     FILE *output_reverse = data->thread_output_reverse;
@@ -659,9 +754,6 @@ void *process_thread_chunk(void *arg)
     {
         printf("Thread %d started; processing %d lines per record\n", thread_id, lines_to_read);
     }
-
-    hash_table_t local_hash_table;
-    init_hash_table(&local_hash_table);
 
     size_t sequences_processed = 0;
 
@@ -708,8 +800,8 @@ void *process_thread_chunk(void *arg)
             }
             continue; // Skip to the next record
         }
-        process_sequence(forward_record[seq_index], &local_hash_table, cfg.ksize, cfg.depth, &seq_high_count_kmers_forward, &total_seq_kmers_forward, thread_id);
-        process_sequence(reverse_record[seq_index], &local_hash_table, cfg.ksize, cfg.depth, &seq_high_count_kmers_reverse, &total_seq_kmers_reverse, thread_id);
+        process_sequence(forward_record[seq_index], local_hash_table, cfg.ksize, cfg.depth, &seq_high_count_kmers_forward, &total_seq_kmers_forward, thread_id);
+        process_sequence(reverse_record[seq_index], local_hash_table, cfg.ksize, cfg.depth, &seq_high_count_kmers_reverse, &total_seq_kmers_reverse, thread_id);
 
         int seq_high_count_kmers = seq_high_count_kmers_forward + seq_high_count_kmers_reverse;
         int total_seq_kmers = total_seq_kmers_forward + total_seq_kmers_reverse;
@@ -765,7 +857,7 @@ void *process_thread_chunk(void *arg)
             double elapsed_time = difftime(current_time, data->last_report_time);
             size_t sequences_processed = data->processed_count - data->last_report_count;
             double rate = sequences_processed / elapsed_time;
-            total_kmers = local_hash_table.size;
+            total_kmers = local_hash_table->size;
             float printed_improvement = (prev_printed_count == 0) ? 0 : (float)(data->printed_count - prev_printed_count) / prev_printed_count;
             float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
             float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
@@ -815,10 +907,10 @@ void *process_thread_chunk(void *arg)
 
         if (sequences_processed % data->thread_sync_interval == 0)
         {
-            synchronise_hash_tables(&local_hash_table, hash_table, thread_id);
+            synchronise_hash_tables(local_hash_table, thread_id);
         }
     }
-    synchronise_hash_tables(&local_hash_table, hash_table, thread_id);
+    synchronise_hash_tables(local_hash_table, thread_id);
 
     if (cfg.verbose)
         printf("Thread %d: completed processing file\n", thread_id);
@@ -826,7 +918,7 @@ void *process_thread_chunk(void *arg)
     return NULL;
 }
 
-int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap, hash_table_t *global_hash_table)
+int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap)
 {
     char stop_char = strcmp(cfg.filetype, "fa") == 0 ? '>' : '@';
 
@@ -840,22 +932,11 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
     char *forward_start = forward_mmap->data;
     char *reverse_start = reverse_mmap->data;
 
-    char *forward_ptr;
-    char *reverse_ptr;
-    size_t forward_size;
-    size_t reverse_size;
-    hash_table_t *hash_table;
-    int thread_id;
     size_t processed_count;
     size_t printed_count;
     size_t skipped_count;
-    size_t total_kmers;
     time_t last_report_time;
     int last_report_count;
-    FILE *thread_output_forward;
-    FILE *thread_output_reverse;
-    char *thread_output_forward_filename;
-    char *thread_output_reverse_filename;
     int thread_sync_interval;
 
     for (int i = 0; i < cfg.cpus; i++)
@@ -904,14 +985,6 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
             fprintf(stderr, "Error joining thread %d\n", i);
             return 1;
         }
-
-
-	// pointers must be freed?
-
-         thread_data[i].forward_ptr = NULL;
-         thread_data[i].reverse_ptr = NULL;
-//keep         thread_data[i].hash_table = NULL;
-
     }
 
     // Generate final report
@@ -922,43 +995,49 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
         total_printed += thread_data[i].printed_count;
         total_skipped += thread_data[i].skipped_count;
     }
-    // reported_data->total_processed = total_processed;
-    // reported_data->total_printed = total_printed;
-    // reported_data->total_skipped = total_skipped;
-    // reported_data->total_kmers = total_kmers;
+    pthread_mutex_lock(&reporting_data); // we don't have threads anymore but still.
+    reporting.total_processed = total_processed;
+    reporting.total_printed = total_printed;
+    reporting.total_skipped = total_skipped;
+    reporting.total_kmers = global_hash_table.size;
+    reporting.files_processed++;
+    pthread_mutex_unlock(&reporting_data);
 
     printf("File's statistics: Processed %'zu, Printed %'zu, Skipped %'zu, Total unique kmers: %'zu\n",
-           total_processed, total_printed, total_skipped, global_hash_table->size);
+           total_processed, total_printed, total_skipped, global_hash_table.size);
 
     return 0;
 }
 
-void synchronise_hash_tables(hash_table_t *local_ht, hash_table_t *global_ht, int thread_id)
+void synchronise_hash_tables(hash_table_t *local_ht, int thread_id)
 {
-    // only one thread can sync at a time
-    // pthread_mutex_lock(&sync_table_mutex);
+
+    printf("Thread %d: Is the global table empty? %s\n", thread_id, is_hash_table_empty(&global_hash_table) ? "true" : "false");
 
     // check if hash tables are the same size, otherwise make them so.
-    if (local_ht->capacity > global_ht->capacity)
+    // only needed for global table since local table is recreated
+    // if (global_hash_table.capacity > local_ht->capacity)
+    // {
+    //     if (cfg.debug)
+    //         printf("Thread %d: Increasing local table capacity %'zu to meet global %'zu\n", thread_id, local_ht->capacity, global_hash_table.capacity);
+    //     expand_local_hash_table(local_ht, global_hash_table.capacity, thread_id);
+    // }
+    if (local_ht->capacity > global_hash_table.capacity)
     {
         if (cfg.debug)
-            printf("Thread %d: Increasing global table capacity %'zu to meet local %'zu\n", thread_id, global_ht->capacity, local_ht->capacity);
-        expand_global_hash_table(global_ht, local_ht->capacity, thread_id);
-    }
-    if (global_ht->capacity > local_ht->capacity)
-    {
-        if (cfg.debug)
-            printf("Thread %d: Increasing local table capacity %'zu to meet global %'zu\n", thread_id, local_ht->capacity, global_ht->capacity);
-        expand_local_hash_table(local_ht, global_ht->capacity, thread_id);
+            printf("Thread %d: Increasing global table capacity %'zu to meet local %'zu\n", thread_id, global_hash_table.capacity, local_ht->capacity);
+
+        expand_global_hash_table(local_ht->capacity, thread_id, false);
     }
 
     if (cfg.debug)
-        printf("Thread %d: Synchronising local hash table (%'zu) with master (%'zu)\n", thread_id, local_ht->capacity, global_ht->capacity);
+        printf("Thread %d: Synchronising local hash table (%'zu) with master (%'zu)\n", thread_id, local_ht->capacity, global_hash_table.capacity);
 
-    if (global_ht->capacity != local_ht->capacity)
+    if (global_hash_table.capacity < local_ht->capacity)
     {
         if (cfg.debug)
-            printf("Thread %d: Global hash table capacity %'zu is not the same as local table %'zu!\n", thread_id, global_ht->capacity, local_ht->capacity);
+            printf("Thread %d: Global hash table capacity %'zu is (still) smaller than the local table %'zu!\n", thread_id, global_hash_table.capacity, local_ht->capacity);
+
         exit(EXIT_FAILURE);
     }
 
@@ -966,56 +1045,94 @@ void synchronise_hash_tables(hash_table_t *local_ht, hash_table_t *global_ht, in
         printf("Thread %d: Locking global hash table\n", thread_id);
 
     pthread_mutex_lock(&hash_table_mutex);
-    // Merge local hash table into global hash table
+
+    // Merge (potentially smaller) local hash table into global hash table
+
+    size_t new_global_size = global_hash_table.size;
+    int collision_count = 0, total_collisions = 0;
+    int collision_cutoff = global_hash_table.capacity * 0.01;
+    printf("Thread %d: up to %d collisions allowed into global table with capacity %zu and used size %zu\n", thread_id, collision_cutoff, global_hash_table.capacity, global_hash_table.size);
+
     for (size_t i = 0; i < local_ht->capacity; i++)
     {
+        // printf("Thread %d: Checking index %zu\n", thread_id, i);
+
         if (local_ht->entries[i].hash != 0)
         {
-            size_t index = local_ht->entries[i].hash % global_ht->capacity;
-            while (global_ht->entries[index].hash != 0 &&
-                   global_ht->entries[index].hash != local_ht->entries[i].hash)
+            // printf("Thread %d: Kmer found at index %zu\n", thread_id, i);
+            size_t index = local_ht->entries[i].hash % global_hash_table.capacity;
+            size_t original_index = index;
+
+            while (global_hash_table.entries[index].hash != 0 &&
+                   global_hash_table.entries[index].hash != local_ht->entries[i].hash)
             {
-                index = (index + 1) % global_ht->capacity;
+                // if (collision_count % 10000 == 0)
+                //     printf("Thread %d: COLLISION %d\n", thread_id, collision_count);
+
+                index = (index + 1) % global_hash_table.capacity;
+
+                collision_count++;
+                // thread tables can host different kmers, when they sync the global may run out of capacity.
+                if (index == original_index || collision_count != 0 && collision_count > collision_cutoff)
+                {
+                    printf("Thread %d: Collisions %d are above limit of %d, expanding global hash table\n", thread_id, collision_count, collision_cutoff);
+                    expand_global_hash_table(0, thread_id, true);
+                    total_collisions += collision_count;
+                    collision_count = 0;
+                    collision_cutoff = global_hash_table.capacity * 0.1;
+                }
             }
-            if (global_ht->entries[index].hash == 0)
+
+            if (global_hash_table.entries[index].hash == 0)
             {
-                global_ht->entries[index] = local_ht->entries[i];
-                __atomic_add_fetch(&global_ht->size, 1, __ATOMIC_SEQ_CST);
+                global_hash_table.entries[index] = local_ht->entries[i];
+                new_global_size++; // we update size later, once.
             }
             else
             {
-                __atomic_add_fetch(&global_ht->entries[index].count,
+                __atomic_add_fetch(&global_hash_table.entries[index].count,
                                    local_ht->entries[i].count, __ATOMIC_SEQ_CST);
             }
         }
     }
 
+    total_collisions += collision_count;
+
+    // set size once
+    global_hash_table.size = new_global_size;
+
     // Copy global hash table back to local hash table
-    free(local_ht->entries);
-    local_ht->entries = calloc(global_ht->capacity, sizeof(kmer_t));
+    if (local_ht->entries)
+        free(local_ht->entries);
+    local_ht->entries = calloc(global_hash_table.capacity, sizeof(kmer_t));
     if (!local_ht->entries)
     {
         fprintf(stderr, "Thread %d: Memory allocation failed in synchronize_hash_tables\n", thread_id);
         exit(EXIT_FAILURE);
     }
-    memcpy(local_ht->entries, global_ht->entries, global_ht->capacity * sizeof(kmer_t));
-    local_ht->size = global_ht->size;
-    local_ht->capacity = global_ht->capacity;
+
+    memcpy(local_ht->entries, global_hash_table.entries, global_hash_table.capacity * sizeof(kmer_t));
+    local_ht->size = global_hash_table.size;
+    local_ht->capacity = global_hash_table.capacity;
 
     if (cfg.debug)
         printf("Thread %d: Unlocked global hash table\n", thread_id);
     pthread_mutex_unlock(&hash_table_mutex);
-    // pthread_mutex_unlock(&sync_table_mutex);
-
     if (cfg.debug)
-        printf("Thread %d: Hash table sync complete\n", thread_id);
+        printf("Thread %d: Hash table sync complete, %d collisions occurred\n", thread_id, total_collisions);
 }
 
 int main(int argc, char *argv[])
 {
     setlocale(LC_ALL, "");
-    memset(&cfg, 0, sizeof(struct config));
+    memset(&reporting, 0, sizeof(struct reporting_t));
+    reporting.total_processed = 0;
+    reporting.total_printed = 0;
+    reporting.total_skipped = 0;
+    reporting.total_kmers = 0;
+    reporting.files_processed = 0;
 
+    memset(&cfg, 0, sizeof(struct config_t));
     if (!parse_arguments(argc, argv))
     {
         printf("Issue parsing options\n");
@@ -1025,32 +1142,22 @@ int main(int argc, char *argv[])
 
     // Initialize mutexes
     if (pthread_mutex_init(&hash_table_mutex, NULL) != 0 ||
-        // pthread_mutex_init(&output_mutex, NULL) != 0 ||
+        pthread_mutex_init(&reporting_data, NULL) != 0 ||
         pthread_mutex_init(&sync_table_mutex, NULL) != 0)
     {
         fprintf(stderr, "Error initializing mutexes\n");
         return 1;
     }
 
-    // char *output_forward_filename = create_output_filename("output_forward", cfg.ksize, cfg.depth);
-    // char *output_reverse_filename = create_output_filename("output_reverse", cfg.ksize, cfg.depth);
-
-    // FILE *output_forward = fopen(output_forward_filename, "w");
-    // FILE *output_reverse = fopen(output_reverse_filename, "w");
-    // if (!output_forward || !output_reverse)
-    // {
-    //     fprintf(stderr, "Error opening output files\n");
-    //     goto cleanup;
-    // }
-
-    hash_table_t global_hash_table;
     init_hash_table(&global_hash_table);
-
+    printf("MAIN: Is the global table empty? %s\n", is_hash_table_empty(&global_hash_table) ? "true" : "false");
     // initialise the output files for each thread (otherwise we'd need to open as append)
     // every thread prints to its own file
     thread_data_t thread_data[cfg.cpus];
     for (int i = 0; i < cfg.cpus; i++)
     {
+        thread_data[i].thread_output_forward_filename = NULL;
+        thread_data[i].thread_output_reverse_filename = NULL;
         thread_data[i].thread_output_forward_filename = create_output_filename("output_forward", cfg.ksize, cfg.depth, i);
         thread_data[i].thread_output_reverse_filename = create_output_filename("output_reverse", cfg.ksize, cfg.depth, i);
         thread_data[i].thread_output_forward = fopen(thread_data[i].thread_output_forward_filename, "w");
@@ -1066,8 +1173,13 @@ int main(int argc, char *argv[])
 
         thread_data[i].forward_ptr = NULL;
         thread_data[i].reverse_ptr = NULL;
-        thread_data[i].hash_table = &global_hash_table; // copy global hash table into local thread
 
+        // copy global hash table into local thread
+        // thread_data[i].hash_table = &global_hash_table; // pointer,
+        thread_data[i].hash_table = NULL;
+        thread_data[i].hash_table = copy_hash_table(&global_hash_table);
+        printf("MAIN2: Is the global table empty? %s\n", is_hash_table_empty(&global_hash_table) ? "true" : "false");
+        printf("MAIN3: Is the local table of thread %d empty? %s\n", i, is_hash_table_empty(thread_data[i].hash_table) ? "true" : "false");
     }
     time_t start_time = time(NULL);
 
@@ -1084,7 +1196,7 @@ int main(int argc, char *argv[])
         }
 
         // passing local copy as was having issues with pointers.
-        if (multithreaded_process_files(thread_data, &forward_mmap, &reverse_mmap, &global_hash_table) != 0)
+        if (multithreaded_process_files(thread_data, &forward_mmap, &reverse_mmap) != 0)
         {
             fprintf(stderr, "Error processing files\n");
 	        munmap_file(&forward_mmap);
@@ -1100,15 +1212,17 @@ int main(int argc, char *argv[])
     {
         fclose(thread_data[i].thread_output_forward);
         fclose(thread_data[i].thread_output_reverse);
-        //free(thread_data[i].thread_output_reverse);
-        //free(thread_data[i].thread_output_reverse);
- }
+        free(thread_data[i].thread_output_forward_filename);
+        free(thread_data[i].thread_output_reverse_filename);
+        free(thread_data[i].hash_table->entries);
+        free(thread_data[i].hash_table);
+    }
+
     printf("\n--- Final Report ---\n");
-    // printf("Processed Records: %'zu\n", reporting->total_processed);
-    // printf("Printed Records: %'zu\n", reporting->total_printed);
-    // printf("Skipped Records: %'zu\n", reporting->total_skipped);
-    // printf("Total kmers across all sequences: %'zu\n", reporting->total_kmers);
-    printf("Final hash table size: %'zu\n", global_hash_table.size);
+    printf("Processed Records: %'zu\n", reporting.total_processed);
+    printf("Printed Records: %'zu\n", reporting.total_printed);
+    printf("Skipped Records: %'zu\n", reporting.total_skipped);
+    printf("Total kmers across all sequences: %'zu\n", reporting.total_kmers);
 
 cleanup:
     // Clean up
@@ -1123,7 +1237,7 @@ cleanup:
 
     // Destroy mutexes
     pthread_mutex_destroy(&hash_table_mutex);
-    // pthread_mutex_destroy(&output_mutex);
+    pthread_mutex_destroy(&reporting_data);
     pthread_mutex_destroy(&sync_table_mutex);
 
     time_t end_time = time(NULL);
