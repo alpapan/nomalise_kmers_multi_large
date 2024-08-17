@@ -14,3 +14,4 @@ output_reverse.k25_norm2_thread2
 output_reverse.k25_norm2_thread3
 reverse.fastq
 reverse2.fastq
+normalise_kmers_multi

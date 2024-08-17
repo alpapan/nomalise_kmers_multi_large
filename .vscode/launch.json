@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "norm kmer test multiple files",
+      "name": "norm kmer test multiple small files",
       "type": "cppdbg",
       "request": "launch",
       "program": "${fileDirname}/${fileBasenameNoExtension}",
@@ -46,6 +46,43 @@
       "args": [
         "--forward",
         "forward.fastq",
+        "forward2.fastq",
+        "--reverse",
+        "reverse.fastq",
+        "reverse2.fastq",
+        "--depth",
+        "2",
+        "--verbose",
+        "--debug",
+        "1",
+        "-p",
+        "2",
+        "-m",
+        "1000001"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "gcc build active file",
+      "miDebuggerPath": "/usr/bin/gdb"
+    },
+    {
+      "name": "norm kmer single thread",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${fileDirname}/${fileBasenameNoExtension}",
+      "args": [
+        "--forward",
+        "forward.fastq",
         "--reverse",
         "reverse.fastq",
         "--depth",
@@ -54,7 +91,7 @@
         "--debug",
         "1",
         "-p",
-        "2",
+        "1",
         "-m",
         "1000001"
       ],

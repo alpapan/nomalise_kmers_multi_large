@@ -47,6 +47,10 @@ typedef struct hash_table_t
 } hash_table_t;
 hash_table_t global_hash_table;
 
+// if we decide on partitions.
+#define NUM_PARTITIONS 4
+hash_table_t global_hash_tables[NUM_PARTITIONS];
+
 typedef struct
 {
     char *forward_ptr;
@@ -54,6 +58,7 @@ typedef struct
     size_t forward_size;
     size_t reverse_size;
     hash_table_t *hash_table;
+    // hash_table_t *hash_tables[NUM_PARTITIONS];
     int thread_id;
     size_t processed_count;
     size_t printed_count;
@@ -453,13 +458,13 @@ size_t expand_global_hash_table(size_t new_capacity, int thread_id, bool nolock)
 
     if (cfg.debug)
     {
-        printf("Thread %d: Global hash table expansion triggered, from %'zu to %'zu\n", thread_id, global_hash_table.capacity, new_capacity);
+        printf("Thread %d: Master Hash table expansion triggered, from %'zu to %'zu\n", thread_id, global_hash_table.capacity, new_capacity);
     }
 
     kmer_t *new_entries = calloc(new_capacity, sizeof(kmer_t));
     if (!new_entries)
     {
-        fprintf(stderr, "Error: Thread %d: Memory allocation failed to expand global hash table, from %'zu to %'zu\n", thread_id, global_hash_table.capacity, new_capacity);
+        fprintf(stderr, "Error: Thread %d: Memory allocation failed to expand Master Hash table, from %'zu to %'zu\n", thread_id, global_hash_table.capacity, new_capacity);
         exit(EXIT_FAILURE);
     }
 
@@ -493,11 +498,11 @@ size_t expand_global_hash_table(size_t new_capacity, int thread_id, bool nolock)
 
     if (new_global_hash_size >= new_capacity * 0.90)
     {
-        fprintf(stderr, "Warning: Thread %d: Global hash table is still over 90%% full after expansion (%'zu)\n", thread_id, new_global_hash_size);
+        fprintf(stderr, "Warning: Thread %d: Master Hash table is still over 90%% full after expansion (%'zu)\n", thread_id, new_global_hash_size);
     }
 
     if (cfg.debug)
-        printf("Thread %d: Global hash table expansion completed successfully, using %'zu (mem: %'.2f) of %'zu new capacity (mem: %'.2f)\n", thread_id, new_global_hash_size, capacity2memory(&new_global_hash_size), new_capacity, capacity2memory(&new_capacity));
+        printf("Thread %d: Master Hash table expansion completed successfully, using %'zu (mem: %'.2f) of %'zu new capacity (mem: %'.2f)\n", thread_id, new_global_hash_size, capacity2memory(&new_global_hash_size), new_capacity, capacity2memory(&new_capacity));
 
     if (nolock == false)
         pthread_mutex_unlock(&hash_table_mutex);
@@ -635,6 +640,11 @@ void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM
             uint64_t hash = kmer_hash(seq + i, K);
             if (hash == 0)
                 continue;
+
+            // which table to store.
+            // uint8_t first_base = base_map[(uint8_t)seq[0]];
+            // is this correct??
+            // hash_table_t *used_hash_table = &hash_table[first_base];
 
             (*total_seq_kmers)++;
             int index = store_kmer(hash_table, hash, thread_id);
@@ -1012,7 +1022,8 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
 void synchronise_hash_tables(hash_table_t *local_ht, int thread_id)
 {
 
-    printf("Thread %d: Is the global table empty? %s\n", thread_id, is_hash_table_empty(&global_hash_table) ? "true" : "false");
+    if (cfg.debug > 2)
+        printf("Thread %d: Is the global table empty? %s\n", thread_id, is_hash_table_empty(&global_hash_table) ? "true" : "false");
 
     // check if hash tables are the same size, otherwise make them so.
     // only needed for global table since local table is recreated
@@ -1036,38 +1047,51 @@ void synchronise_hash_tables(hash_table_t *local_ht, int thread_id)
     if (global_hash_table.capacity < local_ht->capacity)
     {
         if (cfg.debug)
-            printf("Thread %d: Global hash table capacity %'zu is (still) smaller than the local table %'zu!\n", thread_id, global_hash_table.capacity, local_ht->capacity);
+            printf("Thread %d: Master Hash table capacity %'zu is (still) smaller than the local table %'zu!\n", thread_id, global_hash_table.capacity, local_ht->capacity);
 
         exit(EXIT_FAILURE);
     }
 
-    if (cfg.debug)
-        printf("Thread %d: Locking global hash table\n", thread_id);
+    if (cfg.debug > 2)
+        printf("Thread %d: Locking Master Hash table\n", thread_id);
 
     pthread_mutex_lock(&hash_table_mutex);
 
-    // Merge (potentially smaller) local hash table into global hash table
+    // Merge (potentially smaller) local hash table into Master Hash table
 
     size_t new_global_size = global_hash_table.size;
     int collision_count = 0, total_collisions = 0;
-    int collision_cutoff = global_hash_table.capacity * 0.01;
-    printf("Thread %d: up to %d collisions allowed into global table with capacity %zu and used size %zu\n", thread_id, collision_cutoff, global_hash_table.capacity, global_hash_table.size);
+    int collision_cutoff = global_hash_table.capacity * 0.1;
+
+    if (cfg.debug > 2)
+        printf("Thread %d: up to %d collisions allowed into global table with capacity %zu and used size %zu\n", thread_id, collision_cutoff, global_hash_table.capacity, global_hash_table.size);
 
     for (size_t i = 0; i < local_ht->capacity; i++)
     {
         // printf("Thread %d: Checking index %zu\n", thread_id, i);
-
         if (local_ht->entries[i].hash != 0)
         {
             // printf("Thread %d: Kmer found at index %zu\n", thread_id, i);
+
             size_t index = local_ht->entries[i].hash % global_hash_table.capacity;
+
+            // it's empty, set and go to next.
+            if (global_hash_table.entries[index].hash == 0)
+            {
+                global_hash_table.entries[index] = local_ht->entries[i];
+                new_global_size++; // we update size later, once.
+                continue;
+            }
+
             size_t original_index = index;
+            // printf("Thread %d: Master Hash at index %zu has hash %lu and local is %lu\n", thread_id, index, global_hash_table.entries[index].hash, local_ht->entries[i].hash);
 
             while (global_hash_table.entries[index].hash != 0 &&
                    global_hash_table.entries[index].hash != local_ht->entries[i].hash)
             {
-                // if (collision_count % 10000 == 0)
-                //     printf("Thread %d: COLLISION %d\n", thread_id, collision_count);
+                if (cfg.debug > 2)
+                    if (collision_count == 1)
+                        printf("Thread %d: Master Hash is %lu for index %zu, local is %lu, collision %d\n", thread_id, global_hash_table.entries[index].hash, index, local_ht->entries[i].hash, collision_count);
 
                 index = (index + 1) % global_hash_table.capacity;
 
@@ -1075,7 +1099,8 @@ void synchronise_hash_tables(hash_table_t *local_ht, int thread_id)
                 // thread tables can host different kmers, when they sync the global may run out of capacity.
                 if (index == original_index || collision_count != 0 && collision_count > collision_cutoff)
                 {
-                    printf("Thread %d: Collisions %d are above limit of %d, expanding global hash table\n", thread_id, collision_count, collision_cutoff);
+                    if (cfg.debug > 2)
+                        printf("Thread %d: Collisions %d are above limit of %d, expanding Master Hash table\n", thread_id, collision_count, collision_cutoff);
                     expand_global_hash_table(0, thread_id, true);
                     total_collisions += collision_count;
                     collision_count = 0;
@@ -1101,7 +1126,7 @@ void synchronise_hash_tables(hash_table_t *local_ht, int thread_id)
     // set size once
     global_hash_table.size = new_global_size;
 
-    // Copy global hash table back to local hash table
+    // Copy Master Hash table back to local hash table
     if (local_ht->entries)
         free(local_ht->entries);
     local_ht->entries = calloc(global_hash_table.capacity, sizeof(kmer_t));
@@ -1115,8 +1140,8 @@ void synchronise_hash_tables(hash_table_t *local_ht, int thread_id)
     local_ht->size = global_hash_table.size;
     local_ht->capacity = global_hash_table.capacity;
 
-    if (cfg.debug)
-        printf("Thread %d: Unlocked global hash table\n", thread_id);
+    if (cfg.debug > 2)
+        printf("Thread %d: Unlocked Master Hash table\n", thread_id);
     pthread_mutex_unlock(&hash_table_mutex);
     if (cfg.debug)
         printf("Thread %d: Hash table sync complete, %d collisions occurred\n", thread_id, total_collisions);
@@ -1149,10 +1174,14 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // for (int i=0;i<NUM_PARTITIONS;i++){
+    //     init_hash_table(&global_hash_tables[i]);
+    // }
     init_hash_table(&global_hash_table);
-    printf("MAIN: Is the global table empty? %s\n", is_hash_table_empty(&global_hash_table) ? "true" : "false");
+
     // initialise the output files for each thread (otherwise we'd need to open as append)
     // every thread prints to its own file
+
     thread_data_t thread_data[cfg.cpus];
     for (int i = 0; i < cfg.cpus; i++)
     {
@@ -1174,12 +1203,17 @@ int main(int argc, char *argv[])
         thread_data[i].forward_ptr = NULL;
         thread_data[i].reverse_ptr = NULL;
 
-        // copy global hash table into local thread
-        // thread_data[i].hash_table = &global_hash_table; // pointer,
+        // copy Master Hash table into local thread
         thread_data[i].hash_table = NULL;
         thread_data[i].hash_table = copy_hash_table(&global_hash_table);
-        printf("MAIN2: Is the global table empty? %s\n", is_hash_table_empty(&global_hash_table) ? "true" : "false");
-        printf("MAIN3: Is the local table of thread %d empty? %s\n", i, is_hash_table_empty(thread_data[i].hash_table) ? "true" : "false");
+        // thread_data[i].hash_table = &global_hash_table; // pointer,
+        // for (int m = 0; i < NUM_PARTITIONS; m++)
+        // {
+        //     thread_data[i].hash_tables[m] = NULL;
+        //     thread_data[i].hash_tables[m] = copy_hash_table(&global_hash_tables[m]);
+        // }
+        // printf("MAIN2: Is the global table empty? %s\n", is_hash_table_empty(&global_hash_table) ? "true" : "false");
+        // printf("MAIN3: Is the local table of thread %d empty? %s\n", i, is_hash_table_empty(thread_data[i].hash_table) ? "true" : "false");
     }
     time_t start_time = time(NULL);
 
