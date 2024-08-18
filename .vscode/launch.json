@@ -21,7 +21,7 @@
         "-p",
         "2",
         "-m",
-        "1000001"
+        "10000001"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
@@ -58,7 +58,7 @@
         "-p",
         "2",
         "-m",
-        "1000001"
+        "10000001"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
@@ -93,7 +93,7 @@
         "-p",
         "1",
         "-m",
-        "1000001"
+        "10000001"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
