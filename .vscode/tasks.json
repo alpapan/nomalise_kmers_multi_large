@@ -20,6 +20,37 @@
         "kind": "build",
         "isDefault": true
       }
+    },
+    {
+      "label": "valgrind",
+      "type": "shell",
+      "command": "/usr/bin/valgrind",
+      "args": [
+        "--leak-check=full",
+        "--show-leak-kinds=all",
+        "--track-origins=yes",
+        "--verbose",
+        "${fileDirname}/${fileBasenameNoExtension}",
+        "--forward",
+        "forward.fastq",
+        "--reverse",
+        "reverse.fastq",
+        "--depth",
+        "4",
+        "--verbose",
+        "--debug",
+        "2",
+        "-p",
+        "1",
+        "-m",
+        "2"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "dependsOn": ["gcc build active file"],
+      "problemMatcher": []
     }
   ]
 }

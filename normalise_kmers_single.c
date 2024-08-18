@@ -22,7 +22,7 @@ typedef struct
 typedef struct
 {
     kmer_t *entries;
-    size_t size;
+    size_t used;
     size_t capacity;
 } hash_table_t;
 
@@ -82,7 +82,7 @@ void expand_hash_table(hash_table_t *ht)
     printf("Memory expanded: %zu\n", new_capacity);
 }
 
-inline uint64_t kmer_hash(const char *seq, int k)
+inline uint64_t encode_kmer(const char *seq, int k)
 {
     static const uint8_t base_map[256] = {
         ['A'] = 0x00, ['C'] = 0x01, ['G'] = 0x02, ['T'] = 0x03};
@@ -145,7 +145,7 @@ void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM
     int seq_len = strlen(seq);
     for (int i = 0; i <= seq_len - K; i++)
     {
-        uint64_t hash = kmer_hash(seq + i, K);
+        uint64_t hash = encode_kmer(seq + i, K);
         if (hash == 0)
             continue;
         (*total_seq_kmers)++;

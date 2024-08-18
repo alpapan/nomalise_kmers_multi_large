@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "norm kmer test multiple small files",
+      "name": "norm kmer multiple small files",
       "type": "cppdbg",
       "request": "launch",
       "program": "${fileDirname}/${fileBasenameNoExtension}",
@@ -21,7 +21,7 @@
         "-p",
         "2",
         "-m",
-        "10000001"
+        "2"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
@@ -39,7 +39,7 @@
       "miDebuggerPath": "/usr/bin/gdb"
     },
     {
-      "name": "norm kmer test1",
+      "name": "norm kmer two files 2 threads",
       "type": "cppdbg",
       "request": "launch",
       "program": "${fileDirname}/${fileBasenameNoExtension}",
@@ -58,7 +58,7 @@
         "-p",
         "2",
         "-m",
-        "10000001"
+        "2"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
@@ -76,7 +76,7 @@
       "miDebuggerPath": "/usr/bin/gdb"
     },
     {
-      "name": "norm kmer single thread",
+      "name": "norm kmer 1 file 1 thread",
       "type": "cppdbg",
       "request": "launch",
       "program": "${fileDirname}/${fileBasenameNoExtension}",
@@ -93,7 +93,79 @@
         "-p",
         "1",
         "-m",
-        "10000001"
+        "2"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "gcc build active file",
+      "miDebuggerPath": "/usr/bin/gdb"
+    },
+    {
+      "name": "multi 1x large file, threaded",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${fileDirname}/${fileBasenameNoExtension}",
+      "args": [
+        "--forward",
+        "forward.fastq",
+        "--reverse",
+        "reverse.fastq",
+        "--depth",
+        "4",
+        "--verbose",
+        "--debug",
+        "1",
+        "-p",
+        "2",
+        "-m",
+        "2"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "gcc build active file",
+      "miDebuggerPath": "/usr/bin/gdb"
+    },
+    {
+      "name": "multi 2x large files, threaded",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${fileDirname}/${fileBasenameNoExtension}",
+      "args": [
+        "--forward",
+        "forward.fastq",
+        "forward2.fastq",
+        "--reverse",
+        "reverse.fastq",
+        "reverse2.fastq",
+        "--depth",
+        "4",
+        "--verbose",
+        "--debug",
+        "1",
+        "-p",
+        "2",
+        "-m",
+        "2"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
