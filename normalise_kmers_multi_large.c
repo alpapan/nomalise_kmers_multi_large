@@ -127,27 +127,54 @@ static const uint8_t base_map[256] = {
     ['A'] = 0x00, ['C'] = 0x01, ['G'] = 0x02, ['T'] = 0x03};
 
 // Function prototypes
-void init_hash_table(hash_table_t *ht);
-size_t expand_global_hash_table(size_t new_capacity, int thread_id, bool nolock);
-size_t expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread_id);
-static inline uint64_t kmer_hash(const char *seq, int k);
-char *create_output_filename(const char *basename, int k, int norm_depth, int thread);
-int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
-int store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id);
-void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id);
-void print_usage(char *program_name);
-int parse_arguments(int argc, char *argv[]);
-mmap_file_t mmap_file(const char *filename);
-void munmap_file(mmap_file_t *mf);
-void synchronise_hash_tables(hash_table_t *local_ht, int thread_id);
-void *process_thread_chunk(void *arg);
-bool valid_dna(const char *sequence);
 char *read_line(char *ptr, char *buffer, int max_length);
-static void replacestr(const char *line, const char *search, const char *replace);
-char *find_next_record_start(char *ptr, char *end_ptr, char stop_char);
-hash_table_t *copy_hash_table(const hash_table_t *source);
 float capacity2memory(size_t *capacity);
 uint64_t double_hash(uint64_t hash, size_t capacity);
+mmap_file_t mmap_file(const char *filename);
+void munmap_file(mmap_file_t *mf);
+char *find_next_record_start(char *ptr, char *end_ptr, char stop_char);
+static void replacestr(const char *line, const char *search, const char *replace);
+
+////
+
+void print_usage(char *program_name);
+int parse_arguments(int argc, char *argv[]);
+void process_forward_files(char *first_file, char **additional_files);
+void process_reverse_files(char *first_file, char **additional_files);
+char *create_output_filename(const char *basename, int k, int norm_depth, int thread);
+
+////
+
+bool is_hash_table_empty(const hash_table_t *ht);
+void init_hash_table(hash_table_t *ht);
+hash_table_t *copy_hash_table(const hash_table_t *source);
+int store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id);
+size_t expand_global_hash_table(size_t new_capacity, int thread_id, bool nolock);
+size_t expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread_id);
+void synchronise_hash_tables(hash_table_t *local_ht, int thread_id);
+
+////
+
+uint64_t double_hash(uint64_t hash, size_t capacity);
+uint64_t murmurhash3(const char *key, int len, uint32_t seed);
+static inline uint64_t kmer_hash(const char *seq, int k);
+uint8_t nt2bit(char nt);
+char bit2nt(uint8_t bit);
+static inline uint64_t kmer_hash_plain(const char *seq, int k);
+static inline uint64_t mix_bits(uint64_t hash);
+static inline uint64_t kmer_hash_fnv(const char *seq, int k);
+
+////
+
+bool valid_dna(const char *sequence);
+void reverse_complement(const char *seq, char *rev_comp, int k);
+const char *get_canonical_kmer(const char *kmer, int k);
+
+////
+
+void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id);
+void *process_thread_chunk(void *arg);
+int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
 
 ////////////////////////////////////////////////////////////////
 ////////// HELPER FUNCTIONS ////////////////////////////////////
@@ -253,90 +280,6 @@ void print_usage(char *program_name)
     \t\t\t[--coverage|g (float 0-1; def. 0.9)] [--verbose] [--filetype|-t (fq|fa; def. fq)] [--cpu|-p (int; def 4)] [--debug|-b]\n\
     [--canonical|c] [--memory|m (int; def. 150000001)] \n",
             program_name);
-}
-
-void process_forward_files(char *first_file, char **additional_files)
-{
-    // Process the first file
-    if (access(first_file, R_OK) == 0)
-    {
-        cfg.forward_file_count++;
-        cfg.forward_files = realloc(cfg.forward_files, cfg.forward_file_count * sizeof(char *));
-        if (!cfg.forward_files)
-        {
-            fprintf(stderr, "Memory allocation failed\n");
-            exit(1);
-        }
-        cfg.forward_files[cfg.forward_file_count - 1] = strdup(first_file);
-    }
-    else
-    {
-        fprintf(stderr, "Warning: File '%s' does not exist or is not readable. Skipping.\n", first_file);
-    }
-
-    // Process additional files
-    while (*additional_files != NULL && additional_files[0][0] != '-')
-    {
-        if (access(*additional_files, R_OK) == 0)
-        {
-            cfg.forward_file_count++;
-            cfg.forward_files = realloc(cfg.forward_files, cfg.forward_file_count * sizeof(char *));
-            if (!cfg.forward_files)
-            {
-                fprintf(stderr, "Memory allocation failed\n");
-                exit(1);
-            }
-            cfg.forward_files[cfg.forward_file_count - 1] = strdup(*additional_files);
-        }
-        else
-        {
-            fprintf(stderr, "Warning: File '%s' does not exist or is not readable. Skipping.\n", *additional_files);
-        }
-        additional_files++;
-        optind++;
-    }
-}
-
-void process_reverse_files(char *first_file, char **additional_files)
-{
-    // Process the first file
-    if (access(first_file, R_OK) == 0)
-    {
-        cfg.reverse_file_count++;
-        cfg.reverse_files = realloc(cfg.reverse_files, cfg.reverse_file_count * sizeof(char *));
-        if (!cfg.reverse_files)
-        {
-            fprintf(stderr, "Memory allocation failed\n");
-            exit(1);
-        }
-        cfg.reverse_files[cfg.reverse_file_count - 1] = strdup(first_file);
-    }
-    else
-    {
-        fprintf(stderr, "Warning: File '%s' does not exist or is not readable. Skipping.\n", first_file);
-    }
-
-    // Process additional files
-    while (*additional_files != NULL && additional_files[0][0] != '-')
-    {
-        if (access(*additional_files, R_OK) == 0)
-        {
-            cfg.reverse_file_count++;
-            cfg.reverse_files = realloc(cfg.reverse_files, cfg.reverse_file_count * sizeof(char *));
-            if (!cfg.reverse_files)
-            {
-                fprintf(stderr, "Memory allocation failed\n");
-                exit(1);
-            }
-            cfg.reverse_files[cfg.reverse_file_count - 1] = strdup(*additional_files);
-        }
-        else
-        {
-            fprintf(stderr, "Warning: File '%s' does not exist or is not readable. Skipping.\n", *additional_files);
-        }
-        additional_files++;
-        optind++;
-    }
 }
 
 int parse_arguments(int argc, char *argv[])
@@ -484,6 +427,90 @@ int parse_arguments(int argc, char *argv[])
     }
 
     return 1;
+}
+
+void process_forward_files(char *first_file, char **additional_files)
+{
+    // Process the first file
+    if (access(first_file, R_OK) == 0)
+    {
+        cfg.forward_file_count++;
+        cfg.forward_files = realloc(cfg.forward_files, cfg.forward_file_count * sizeof(char *));
+        if (!cfg.forward_files)
+        {
+            fprintf(stderr, "Memory allocation failed\n");
+            exit(1);
+        }
+        cfg.forward_files[cfg.forward_file_count - 1] = strdup(first_file);
+    }
+    else
+    {
+        fprintf(stderr, "Warning: File '%s' does not exist or is not readable. Skipping.\n", first_file);
+    }
+
+    // Process additional files
+    while (*additional_files != NULL && additional_files[0][0] != '-')
+    {
+        if (access(*additional_files, R_OK) == 0)
+        {
+            cfg.forward_file_count++;
+            cfg.forward_files = realloc(cfg.forward_files, cfg.forward_file_count * sizeof(char *));
+            if (!cfg.forward_files)
+            {
+                fprintf(stderr, "Memory allocation failed\n");
+                exit(1);
+            }
+            cfg.forward_files[cfg.forward_file_count - 1] = strdup(*additional_files);
+        }
+        else
+        {
+            fprintf(stderr, "Warning: File '%s' does not exist or is not readable. Skipping.\n", *additional_files);
+        }
+        additional_files++;
+        optind++;
+    }
+}
+
+void process_reverse_files(char *first_file, char **additional_files)
+{
+    // Process the first file
+    if (access(first_file, R_OK) == 0)
+    {
+        cfg.reverse_file_count++;
+        cfg.reverse_files = realloc(cfg.reverse_files, cfg.reverse_file_count * sizeof(char *));
+        if (!cfg.reverse_files)
+        {
+            fprintf(stderr, "Memory allocation failed\n");
+            exit(1);
+        }
+        cfg.reverse_files[cfg.reverse_file_count - 1] = strdup(first_file);
+    }
+    else
+    {
+        fprintf(stderr, "Warning: File '%s' does not exist or is not readable. Skipping.\n", first_file);
+    }
+
+    // Process additional files
+    while (*additional_files != NULL && additional_files[0][0] != '-')
+    {
+        if (access(*additional_files, R_OK) == 0)
+        {
+            cfg.reverse_file_count++;
+            cfg.reverse_files = realloc(cfg.reverse_files, cfg.reverse_file_count * sizeof(char *));
+            if (!cfg.reverse_files)
+            {
+                fprintf(stderr, "Memory allocation failed\n");
+                exit(1);
+            }
+            cfg.reverse_files[cfg.reverse_file_count - 1] = strdup(*additional_files);
+        }
+        else
+        {
+            fprintf(stderr, "Warning: File '%s' does not exist or is not readable. Skipping.\n", *additional_files);
+        }
+        additional_files++;
+        optind++;
+    }
 }
 
 char *create_output_filename(const char *basename, int k, int norm_depth, int thread)
@@ -863,8 +890,6 @@ uint64_t double_hash(uint64_t hash, size_t capacity)
     return 1 + (hash % (capacity - 1));
 }
 
-/////////////////////////
-
 uint64_t murmurhash3(const char *key, int len, uint32_t seed)
 {
     const uint64_t c1 = 0x87c37b91114253d5;
@@ -931,8 +956,6 @@ static inline uint64_t kmer_hash(const char *seq, int k)
     // printf("kmer %s hash1 %u hash2 %u\n", seq, hash1, hash2);
     return hash1;
 }
-
-//////////////////////////
 
 uint8_t nt2bit(char nt)
 {
