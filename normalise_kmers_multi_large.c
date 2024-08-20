@@ -1,3 +1,5 @@
+#define VERSION 20240820
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,32 +79,6 @@ typedef struct hash_table_t
 // #define NUM_PARTITIONS 4
 // hash_table_t global_hash_tables[NUM_PARTITIONS];
 
-typedef struct
-{
-    hash_table_t *hash_table;
-    // hash_table_t *hash_tables[NUM_PARTITIONS];
-    int thread_id;
-    size_t processed_count;
-    size_t printed_count;
-    size_t skipped_count;
-    size_t total_kmers;
-    time_t last_report_time;
-    int last_report_count;
-    FILE *thread_output_forward;
-    FILE *thread_output_reverse;
-    char *thread_output_forward_filename;
-    char *thread_output_reverse_filename;
-    int thread_sync_interval;
-    char *forward_data;
-    char *reverse_data;
-    size_t forward_file_start;
-    size_t forward_file_end;
-    size_t reverse_file_start;
-    size_t reverse_file_end;
-} thread_data_t;
-
-thread_data_t thread_data[MAX_THREADS];
-
 struct reporting_t
 {
     size_t total_processed;
@@ -140,13 +116,57 @@ typedef struct
     size_t size;
 } mmap_file_t;
 
+typedef struct
+{
+    hash_table_t *hash_table;
+    // hash_table_t *hash_tables[NUM_PARTITIONS];
+    int thread_id;
+    size_t processed_count;
+    size_t printed_count;
+    size_t skipped_count;
+    size_t total_kmers;
+    time_t last_report_time;
+    int last_report_count;
+    FILE *thread_output_forward;
+    FILE *thread_output_reverse;
+    char *thread_output_forward_filename;
+    char *thread_output_reverse_filename;
+    int thread_sync_interval;
+    char *forward_data;
+    char *reverse_data;
+    size_t forward_file_start;
+    size_t forward_file_end;
+    size_t reverse_file_start;
+    size_t reverse_file_end;
+    int job_id;
+} thread_data_t;
+
+thread_data_t thread_data[MAX_THREADS];
+
+// job management
+typedef struct Job
+{
+    void (*function)(void *);
+    void *argument;
+    struct Job *next;
+} Job;
+
+typedef struct
+{
+    Job *head;
+    Job *tail;
+    int job_count;
+    int shutdown;
+    pthread_mutex_t lock;
+    pthread_cond_t notify;
+} ThreadPool;
+
 // Function prototypes
 char *read_line(char *ptr, char *buffer, int max_length);
 float capacity2memory(size_t capacity);
 float memoryGB2capacity(size_t memory);
 mmap_file_t mmap_file(const char *filename);
 void munmap_file(mmap_file_t *mf);
-char *find_next_record_start(char *ptr, char *end_ptr, char stop_char);
 static void replacestr(const char *line, const char *search, const char *replace);
 bool is_in_list(const char *target, const char *list[], size_t list_size);
 ////
@@ -183,6 +203,12 @@ void calculate_thread_positions(char *data, size_t total_file_size, int thread_c
 void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id);
 void *process_thread_chunk(void *arg);
 int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
+
+////
+void *thread_manage_job(void *arg);
+void thread_pool_init(ThreadPool *pool, pthread_t *threads);
+void thread_pool_shutdown(ThreadPool *pool, pthread_t *threads);
+void thread_pool_add_job(ThreadPool *pool, void (*function)(void *), void *argument);
 
 ////////////////////////////////////////////////////////////////
 ////////// HELPER FUNCTIONS ////////////////////////////////////
@@ -269,51 +295,6 @@ void munmap_file(mmap_file_t *mf)
         printf("File unmapped successfully\n");
 }
 
-// is this good enough? stop char is > or @ and @ can occur in quality seqs.
-char *find_next_record_start(char *ptr, char *end_ptr, char stop_char)
-{
-    while (ptr < end_ptr && *ptr != stop_char)
-    {
-        ptr = strchr(ptr, '\n');
-        if (ptr)
-            ptr++;
-        else
-            break;
-    }
-    return (ptr < end_ptr) ? ptr : NULL;
-}
-
-char *find_next_record_start2(char *ptr, char *end_ptr, char stop_char)
-{
-    int line_count = 0;
-    while (ptr < end_ptr)
-    {
-        // Check if the current character is the stop character and it's at the beginning of a line
-        if (*ptr == stop_char && (ptr == end_ptr || *(ptr - 1) == '\n'))
-        {
-            line_count = 1; // Reset line count for a new record
-            ptr = strchr(ptr, '\n');
-            if (ptr)
-                ptr++;
-            continue;
-        }
-        else if (*ptr == '\n')
-        {
-            line_count++;
-            if (line_count == 4)
-            {
-                ptr++;
-                if (ptr < end_ptr && *ptr == stop_char)
-                {
-                    return ptr;
-                }
-            }
-        }
-        ptr++;
-    }
-    return NULL;
-}
-
 static void replacestr(const char *line, const char *search, const char *replace)
 {
     char *sp;
@@ -326,7 +307,128 @@ static void replacestr(const char *line, const char *search, const char *replace
         memcpy(sp, replace, replace_len);
     }
 }
+void thread_pool_init(ThreadPool *pool, pthread_t *threads)
+{
+    pool->head = NULL;
+    pool->tail = NULL;
+    pool->job_count = 0;
+    pool->shutdown = 0;
 
+    pthread_mutex_init(&pool->lock, NULL);
+    pthread_cond_init(&pool->notify, NULL);
+
+    for (int i = 0; i < cfg.cpus; i++)
+    {
+        pthread_create(&threads[i], NULL, thread_manage_job, (void *)pool);
+    }
+}
+
+void thread_pool_shutdown(ThreadPool *pool, pthread_t *threads)
+{
+    pthread_mutex_lock(&pool->lock);
+    pool->shutdown = 1;
+    pthread_cond_broadcast(&pool->notify);
+    pthread_mutex_unlock(&pool->lock);
+
+    for (int i = 0; i < cfg.cpus; i++)
+    {
+        pthread_join(threads[i], NULL);
+    }
+
+    // Clean up any remaining jobs
+    while (pool->head != NULL)
+    {
+        Job *job = pool->head;
+        pool->head = job->next;
+        free(job);
+    }
+
+    pthread_mutex_destroy(&pool->lock);
+    pthread_cond_destroy(&pool->notify);
+}
+
+void thread_pool_add_job(ThreadPool *pool, void (*function)(void *), void *argument)
+{
+    Job *job = (Job *)malloc(sizeof(Job));
+    job->function = function;
+    job->argument = argument;
+    job->next = NULL;
+
+    pthread_mutex_lock(&pool->lock);
+
+    if (pool->tail == NULL)
+    {
+        pool->head = job;
+        pool->tail = job;
+    }
+    else
+    {
+        pool->tail->next = job;
+        pool->tail = job;
+    }
+    pool->job_count++;
+
+    pthread_cond_signal(&pool->notify);
+    pthread_mutex_unlock(&pool->lock);
+}
+
+void *thread_manage_job(void *arg)
+{
+    ThreadPool *pool = (ThreadPool *)arg;
+    while (1)
+    {
+        Job *job;
+
+        pthread_mutex_lock(&pool->lock);
+
+        while (pool->job_count == 0 && !pool->shutdown)
+        {
+            pthread_cond_wait(&pool->notify, &pool->lock);
+        }
+
+        if (pool->shutdown)
+        {
+            pthread_mutex_unlock(&pool->lock);
+            break;
+        }
+
+        job = pool->head;
+        if (job != NULL)
+        {
+            pool->head = job->next;
+            if (pool->head == NULL)
+            {
+                pool->tail = NULL;
+            }
+            pool->job_count--;
+        }
+
+        pthread_mutex_unlock(&pool->lock);
+
+        if (job != NULL)
+        {
+            (*(job->function))(job->argument);
+            free(job);
+        }
+    }
+    return NULL;
+}
+
+// while (1)
+// {
+//     int *id = malloc(sizeof(int));
+//     *id = job_id++;
+//     thread_pool_add_job(&pool, example_job, id);
+//     sleep(1);
+// }
+void example_job(void *arg)
+{
+    int id = *(int *)arg;
+    if (cfg.debug)
+        printf("Job %d is being processed by thread %lu\n", id, pthread_self());
+    sleep(1);  // Simulate work
+    free(arg); // Free the dynamically allocated job ID
+}
 ////////////////////////////////////////////////////////////////
 ///////////////// ARGUMENTS AND FILES //////////////////////////
 ////////////////////////////////////////////////////////////////
@@ -467,7 +569,7 @@ int parse_arguments(int argc, char *argv[])
 
     if (cfg.verbose)
     {
-        printf("CMD: ");
+        printf("VERSION: %d, CMD: ", VERSION);
         for (int i = 0; i < argc; i++)
         {
             printf("%s ", argv[i]);
@@ -899,6 +1001,20 @@ const char *get_canonical_kmer(const char *kmer, int k)
 ////////////////////////////////////////////////////////////////
 ///////////////// DATA PROCESSING //////////////////////////////
 ////////////////////////////////////////////////////////////////
+// is this good enough? stop char is > or @ and @ can occur in quality seqs.
+// char *find_next_record_start(char *ptr, char *end_ptr, char stop_char)
+// {
+//     while (ptr < end_ptr && *ptr != stop_char)
+//     {
+//         ptr = strchr(ptr, '\n');
+//         if (ptr)
+//             ptr++;
+//         else
+//             break;
+//     }
+//     return (ptr < end_ptr) ? ptr : NULL;
+// }
+
 size_t find_thread_exact_end(char *data, size_t start_pos, size_t end_pos)
 {
 
@@ -964,6 +1080,7 @@ void calculate_thread_positions(char *data, size_t total_file_size, int thread_c
     }
 }
 
+// a different and better approach would be to submit a thread for X records rather than parse the file and split across. another day
 void calculate_thread_positions_from_records(char *data, size_t total_file_size, int thread_count, size_t **thread_starts, size_t **thread_ends, size_t records)
 {
     size_t records_per_thread = records / thread_count; // last thread will have a bit more
@@ -1313,7 +1430,11 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
 {
     char stop_char = cfg.is_input_fastq == false ? '>' : '@';
 
+    // threading
     pthread_t threads[cfg.cpus];
+    ThreadPool pool;
+    thread_pool_init(&pool, threads);
+    int job_id = 0;
 
     // let's get start and ends for the mmapped file.
     size_t *forward_thread_starts = NULL;
@@ -1334,6 +1455,9 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
     // todo: bug, nb this will not work because forward and reverse can have different file sizes.
     if (cfg.cpus == 1)
     {
+        if (cfg.verbose)
+            printf("Single thread mode\n");
+
         forward_thread_ends[0] = forward_mmap->size - 1;
         reverse_thread_ends[0] = reverse_mmap->size - 1;
     }
@@ -1342,6 +1466,9 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
 
         if (forward_mmap->size == reverse_mmap->size)
         {
+            if (cfg.verbose)
+                printf("The forward and reverse files have the same file size, assuming same number of records!\n");
+
             calculate_thread_positions(forward_mmap->data, forward_mmap->size, cfg.cpus, &forward_thread_starts, &forward_thread_ends);
             calculate_thread_positions(reverse_mmap->data, reverse_mmap->size, cfg.cpus, &reverse_thread_starts, &reverse_thread_ends);
         }
@@ -1430,6 +1557,8 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
         thread_data[thread_number].forward_data = forward_mmap->data;
         thread_data[thread_number].reverse_data = reverse_mmap->data;
 
+        thread_data[thread_number].job_id = 0;
+
         if (!thread_data[thread_number].thread_output_forward || !thread_data[thread_number].thread_output_reverse)
         {
             fprintf(stderr, "Error opening thread-specific output files for thread %d, %s and %s\n", thread_number, thread_data[thread_number].thread_output_forward_filename, thread_data[thread_number].thread_output_reverse_filename);
@@ -1472,7 +1601,14 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
             free(reverse_thread_ends);
             return 1;
         }
+
+        if (!cfg.debug)
+            sleep(60);
+        if (cfg.debug)
+            sleep(2);
     }
+
+    thread_pool_shutdown(&pool, threads);
 
     // final report
     size_t total_processed = 0, total_printed = 0, total_skipped = 0;
