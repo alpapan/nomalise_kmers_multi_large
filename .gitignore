@@ -1,8 +1,3 @@
-a1
-a2
-b1
-b2
-*.fastq
 output_*
 normalise_kmers_multi
 normalise_kmers_multi_large

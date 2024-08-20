@@ -12,6 +12,11 @@
 #include <getopt.h>
 #include <stdbool.h>
 
+// remove redumdant code
+// ensure records are read 2/4 lines at a time
+// support gz bz2 input will be hard because of record boundaries
+// support gz bz2 output will be easier
+
 //////// HELPERS
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -21,20 +26,23 @@
 // output_filename
 // hash_table_t
 // hash_table_t->entries
-// forward_ptr
-// reverse_ptr
+// forward_pointer // managed by mmap
+// reverse_pointer // managed by mmap
 // cfg.forward_files
 // cfg.reverse_files
+// forward_thread_starts
+// forward_thread_ends
+// reverse_thread_starts
+// reverse_thread_ends
 
 // TODO
-// make every thread independent, remove global table and sync, depth divided by cpus
-//
-//
-//
 
 // #define INITIAL_CAPACITY 500000003 // 7.5gb per cpu equiv genome/transcriptome size; should be a prime number; remember we do not convert to canonical kmers (as this was create for rnaseq)
 #define INITIAL_CAPACITY 150000001 // 2.3gb good starting value for a transcriptome, esp if stranded
-#define MAX_SEQ_LENGTH 400
+// we moved away from specifying capacity in code, user specifies starting memory.
+
+#define MAX_LINE_LENGTH 1024
+#define MAX_OUTPUT_LENGTH 8192
 #define CHUNK_SIZE 1000000
 #define MAX_THREADS 256
 // #define SYNC_INTERVAL 100000 // how many seqs/often to sync the kmer tables of each thread, this inits the thread-specific sync interval which increases with more data.
@@ -71,10 +79,6 @@ typedef struct hash_table_t
 
 typedef struct
 {
-    char *forward_ptr;
-    char *reverse_ptr;
-    size_t forward_size;
-    size_t reverse_size;
     hash_table_t *hash_table;
     // hash_table_t *hash_tables[NUM_PARTITIONS];
     int thread_id;
@@ -89,6 +93,12 @@ typedef struct
     char *thread_output_forward_filename;
     char *thread_output_reverse_filename;
     int thread_sync_interval;
+    char *forward_data;
+    char *reverse_data;
+    size_t forward_file_start;
+    size_t forward_file_end;
+    size_t reverse_file_start;
+    size_t reverse_file_end;
 } thread_data_t;
 
 thread_data_t thread_data[MAX_THREADS];
@@ -112,7 +122,10 @@ struct config_t
     int depth;
     float coverage;
     int verbose;
-    char *filetype;
+    char *informat;
+    bool is_input_fastq;
+    char *outformat;
+    bool is_output_fastq;
     int cpus;
     int help;
     int debug;
@@ -135,7 +148,7 @@ mmap_file_t mmap_file(const char *filename);
 void munmap_file(mmap_file_t *mf);
 char *find_next_record_start(char *ptr, char *end_ptr, char stop_char);
 static void replacestr(const char *line, const char *search, const char *replace);
-
+bool is_in_list(const char *target, const char *list[], size_t list_size);
 ////
 
 void print_usage(char *program_name);
@@ -143,24 +156,20 @@ int parse_arguments(int argc, char *argv[]);
 void process_forward_files(char *first_file, char **additional_files);
 void process_reverse_files(char *first_file, char **additional_files);
 char *create_output_filename(const char *basename, int k, int norm_depth, int thread);
+void fastq_to_fasta(char (*fastq_record)[4][MAX_LINE_LENGTH], char *fasta_output, bool is_forward);
 
 ////
 
-bool is_hash_table_empty(const hash_table_t *ht);
 void init_hash_table(hash_table_t *ht);
 hash_table_t *copy_hash_table(const hash_table_t *source);
-int store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id);
+size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id);
 size_t expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread_id);
 void synchronise_hash_tables(hash_table_t *local_ht, int thread_id);
 
 ////
 
-uint64_t murmurhash3(const char *key, int len, uint32_t seed);
-static inline uint64_t encode_kmer_murmur(const char *seq, int k);
 static inline uint64_t encode_kmer_plain(const char *seq, int k);
 char decode_kmer_plain(uint64_t encoded, int k, char *kmer);
-static inline uint64_t mix_bits(uint64_t hash);
-static inline uint64_t kmer_hash_fnv(const char *seq, int k);
 
 ////
 
@@ -169,7 +178,8 @@ void reverse_complement(const char *seq, char *rev_comp, int k);
 const char *get_canonical_kmer(const char *kmer, int k);
 
 ////
-
+size_t find_thread_start(char *data, size_t start_pos, size_t end_pos);
+void calculate_thread_positions(char *data, size_t total_file_size, int thread_count, size_t **thread_starts, size_t **thread_ends);
 void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id);
 void *process_thread_chunk(void *arg);
 int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
@@ -189,7 +199,7 @@ char *read_line(char *ptr, char *buffer, int max_length)
 
     if (*ptr == '\n')
     {
-        ptr++; // Move past the newline character
+        ptr++;
     }
 
     return (*ptr == '\0') ? NULL : ptr;
@@ -210,12 +220,12 @@ float memoryGB2capacity(size_t memory)
 
 mmap_file_t mmap_file(const char *filename)
 {
-    mmap_file_t mf = {NULL, 0};
+    mmap_file_t result = {NULL, 0};
     int fd = open(filename, O_RDONLY);
     if (fd == -1)
     {
-        perror("Error opening file for mmap");
-        return mf;
+        perror("Error opening file");
+        return result;
     }
 
     struct stat sb;
@@ -223,21 +233,28 @@ mmap_file_t mmap_file(const char *filename)
     {
         perror("Error getting file size");
         close(fd);
-        return mf;
+        return result;
     }
 
-    mf.data = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (mf.data == MAP_FAILED)
+    result.size = sb.st_size;
+    if (cfg.debug > 1)
+        printf("File size: %zu\n", result.size);
+
+    result.data = mmap(NULL, result.size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (result.data == MAP_FAILED)
     {
-        perror("Error mmapping the file");
-        close(fd);
-        mf.data = NULL;
-        return mf;
+        perror("Error mapping file");
+        result.data = NULL;
+        result.size = 0;
     }
+    else
+    {
+        if (cfg.debug > 1)
+            printf("File mapped successfully\n");
 
-    mf.size = sb.st_size;
-    close(fd);
-    return mf;
+        close(fd);
+        return result;
+    }
 }
 
 void munmap_file(mmap_file_t *mf)
@@ -248,7 +265,11 @@ void munmap_file(mmap_file_t *mf)
         mf->data = NULL;
         mf->size = 0;
     }
+    if (cfg.debug > 1)
+        printf("File unmapped successfully\n");
 }
+
+// is this good enough? stop char is > or @ and @ can occur in quality seqs.
 char *find_next_record_start(char *ptr, char *end_ptr, char stop_char)
 {
     while (ptr < end_ptr && *ptr != stop_char)
@@ -260,6 +281,37 @@ char *find_next_record_start(char *ptr, char *end_ptr, char stop_char)
             break;
     }
     return (ptr < end_ptr) ? ptr : NULL;
+}
+
+char *find_next_record_start2(char *ptr, char *end_ptr, char stop_char)
+{
+    int line_count = 0;
+    while (ptr < end_ptr)
+    {
+        // Check if the current character is the stop character and it's at the beginning of a line
+        if (*ptr == stop_char && (ptr == end_ptr || *(ptr - 1) == '\n'))
+        {
+            line_count = 1; // Reset line count for a new record
+            ptr = strchr(ptr, '\n');
+            if (ptr)
+                ptr++;
+            continue;
+        }
+        else if (*ptr == '\n')
+        {
+            line_count++;
+            if (line_count == 4)
+            {
+                ptr++;
+                if (ptr < end_ptr && *ptr == stop_char)
+                {
+                    return ptr;
+                }
+            }
+        }
+        ptr++;
+    }
+    return NULL;
 }
 
 static void replacestr(const char *line, const char *search, const char *replace)
@@ -281,9 +333,9 @@ static void replacestr(const char *line, const char *search, const char *replace
 
 void print_usage(char *program_name)
 {
-    fprintf(stderr, "Usage: %s\t--forward file1 [file2+] --reverse file1 [file2+] [--ksize (int; def. 25)] [--depth|-d (int; def. 100)]\n\
-    \t\t\t[--coverage|g (float 0-1; def. 0.9)] [--verbose] [--filetype|-t (fq|fa; def. fq)] [--cpu|-p (int; def 1)] [--debug|-b]\n\
-    [--canonical|c] [--memory|m (int; def. 150000001)] \n",
+    fprintf(stderr, "Usage: %s\t--forward file1 [file2+] --reverse file1 [file2+] [--ksize (int 5-32; def. 25)] [--depth|-d (int; def. 100)]\n\
+    \t\t\t[--coverage|g (float 0-1; def. 0.9)] [--canonical|c] --filetype|-t (fq|fa; def. fq)] [--outformat|o (fq|fq; def. fq)] \n\
+    [--memory_starting|m (int; def. 150000001)] [--cpu|-p (int; def 1)] [--verbose] [--debug|-b]\n",
             program_name);
 }
 
@@ -292,7 +344,10 @@ int parse_arguments(int argc, char *argv[])
     cfg.coverage = 0.9;
     cfg.verbose = 0;
     cfg.debug = 0;
-    cfg.filetype = "fq";
+    cfg.informat = "fq";
+    cfg.is_input_fastq = true;
+    cfg.outformat = "fq";
+    cfg.is_output_fastq = true;
     cfg.cpus = 1;
     cfg.help = 0;
     cfg.forward_file_count = 0;
@@ -311,8 +366,9 @@ int parse_arguments(int argc, char *argv[])
         {"depth", required_argument, 0, 'd'},
         {"coverage", required_argument, 0, 'g'},
         {"filetype", required_argument, 0, 't'},
+        {"outformat", required_argument, 0, 'o'},
         {"cpu", required_argument, 0, 'p'},
-        {"memory", required_argument, 0, 'm'},
+        {"memory_starting", required_argument, 0, 'm'},
         {"debug", required_argument, 0, 'b'},
         {"verbose", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
@@ -322,7 +378,7 @@ int parse_arguments(int argc, char *argv[])
     int opt;
     int option_index = 0;
 
-    while ((opt = getopt_long(argc, argv, "f:r:k:d:g:t:p:m:b:vhc", long_options, &option_index)) != -1)
+    while ((opt = getopt_long(argc, argv, "f:r:k:d:g:t:o:p:m:b:vhc", long_options, &option_index)) != -1)
     {
         switch (opt)
         {
@@ -365,7 +421,43 @@ int parse_arguments(int argc, char *argv[])
             cfg.verbose = 1;
             break;
         case 't':
-            cfg.filetype = optarg;
+            cfg.informat = optarg;
+            if (strcasecmp(cfg.informat, "fa") == 0 || strcasecmp(cfg.informat, "fasta") == 0 || strcasecmp(cfg.informat, "fsa") == 0 || strcasecmp(cfg.informat, "fas") == 0)
+            {
+                cfg.informat = "fa";
+                cfg.is_input_fastq = false;
+            }
+            else if (strcasecmp(cfg.informat, "fq") == 0 || strcasecmp(cfg.informat, "fastq") == 0 || strcasecmp(cfg.informat, "fsq") == 0)
+            {
+                cfg.informat = "fq";
+                cfg.is_input_fastq = true;
+            }
+
+            if (strcmp(cfg.informat, "fq") != 0 && strcmp(cfg.informat, "fa") != 0)
+            {
+                printf("Input file format must be either fa or fq, not %s\n", cfg.informat);
+                return 0;
+            }
+
+            break;
+        case 'o':
+            cfg.outformat = optarg;
+            if (strcasecmp(cfg.outformat, "fa") == 0 || strcasecmp(cfg.outformat, "fasta") == 0 || strcasecmp(cfg.outformat, "fsa") == 0 || strcasecmp(cfg.outformat, "fas") == 0)
+            {
+                cfg.outformat = "fa";
+                cfg.is_output_fastq = false;
+            }
+            else if (strcasecmp(cfg.outformat, "fq") == 0 || strcasecmp(cfg.outformat, "fastq") == 0 || strcasecmp(cfg.outformat, "fsq") == 0)
+            {
+                cfg.outformat = "fq";
+                cfg.is_output_fastq = true;
+            }
+
+            if (strcmp(cfg.outformat, "fq") != 0 && strcmp(cfg.outformat, "fa") != 0)
+            {
+                printf("Output file format must be either fa or fq, not %s\n", cfg.outformat);
+                return 0;
+            }
             break;
         default:
             fprintf(stderr, "Unexpected error in option processing\n");
@@ -450,7 +542,7 @@ int parse_arguments(int argc, char *argv[])
 
 void process_forward_files(char *first_file, char **additional_files)
 {
-    // Process the first file
+    // the first file
     if (access(first_file, R_OK) == 0)
     {
         cfg.forward_file_count++;
@@ -467,7 +559,7 @@ void process_forward_files(char *first_file, char **additional_files)
         fprintf(stderr, "Warning: File '%s' does not exist or is not readable. Skipping.\n", first_file);
     }
 
-    // Process additional files
+    // additional files
     while (*additional_files != NULL && additional_files[0][0] != '-')
     {
         if (access(*additional_files, R_OK) == 0)
@@ -545,21 +637,35 @@ char *create_output_filename(const char *basename, int k, int norm_depth, int th
     return output_filename;
 }
 
+void fastq_to_fasta(char (*fastq_record)[4][MAX_LINE_LENGTH], char *fasta_output, bool is_forward)
+{
+    const char *suffix = (is_forward) ? "/1" : "/2";
+
+    char header[MAX_LINE_LENGTH];
+    char seq[MAX_LINE_LENGTH];
+
+    fasta_output[0] = '\0';
+
+    strcpy(header, (*fastq_record)[0]);
+    strcpy(seq, (*fastq_record)[1]);
+
+    header[0] = '>';
+
+    size_t len = strlen(header);
+    if (len < 2 || strcmp(header + len - 2, suffix) != 0)
+    {
+        strcat(header, suffix);
+    }
+
+    strcat(fasta_output, header);
+    strcat(fasta_output, "\n");
+    strcat(fasta_output, seq);
+    strcat(fasta_output, "\n");
+}
+
 ////////////////////////////////////////////////////////////////
 ////////////////HASH TABLE FUNCTIONS ///////////////////////////
 ////////////////////////////////////////////////////////////////
-
-bool is_hash_table_empty(const hash_table_t *ht)
-{
-    for (size_t i = 0; i < ht->capacity; i++)
-    {
-        if (ht->entries[i].hash != 0)
-        {
-            return false;
-        }
-    }
-    return true;
-}
 
 void init_hash_table(hash_table_t *ht)
 {
@@ -594,7 +700,7 @@ hash_table_t *copy_hash_table(const hash_table_t *source)
     return copy;
 }
 
-int store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
+size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
 {
     // this happens locally on a thread specific hash_table so no requirement to do any locking
 
@@ -602,6 +708,12 @@ int store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
         expand_local_hash_table(hash_table, 0, thread_id);
 
     size_t index = hash % hash_table->capacity;
+
+    if (index < 0)
+    {
+        fprintf(stderr, "ERROR1: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
+        exit(EXIT_FAILURE);
+    }
 
     // if entry is null and available:
     if (hash_table->entries[index].hash == 0)
@@ -642,6 +754,11 @@ int store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
             }
 
             index = (index + 1) % hash_table->capacity;
+            if (index < 0)
+            {
+                fprintf(stderr, "ERROR1: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
+                exit(EXIT_FAILURE);
+            }
 
             hash_table->entries[index].count++;
         }
@@ -713,75 +830,6 @@ size_t expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread
 
 /////////////////
 
-uint64_t murmurhash3(const char *key, int len, uint32_t seed)
-{
-    const uint64_t c1 = 0x87c37b91114253d5;
-    const uint64_t c2 = 0x4cf5ad432745937f;
-    uint64_t h1 = seed;
-    const uint64_t *blocks = (const uint64_t *)(key);
-    int nblocks = len / 8;
-
-    for (int i = 0; i < nblocks; i++)
-    {
-        uint64_t k1 = blocks[i];
-        k1 *= c1;
-        k1 = (k1 << 31) | (k1 >> (64 - 31));
-        k1 *= c2;
-
-        h1 ^= k1;
-        h1 = (h1 << 27) | (h1 >> (64 - 27));
-        h1 = h1 * 5 + 0x52dce729;
-    }
-
-    const uint8_t *tail = (const uint8_t *)(key + nblocks * 8);
-    uint64_t k1 = 0;
-
-    switch (len & 7)
-    {
-    case 7:
-        k1 ^= ((uint64_t)tail[6]) << 48;
-    case 6:
-        k1 ^= ((uint64_t)tail[5]) << 40;
-    case 5:
-        k1 ^= ((uint64_t)tail[4]) << 32;
-    case 4:
-        k1 ^= ((uint64_t)tail[3]) << 24;
-    case 3:
-        k1 ^= ((uint64_t)tail[2]) << 16;
-    case 2:
-        k1 ^= ((uint64_t)tail[1]) << 8;
-    case 1:
-        k1 ^= ((uint64_t)tail[0]);
-        k1 *= c1;
-        k1 = (k1 << 31) | (k1 >> (64 - 31));
-        k1 *= c2;
-        h1 ^= k1;
-    }
-
-    h1 ^= len;
-    h1 ^= h1 >> 33;
-    h1 *= 0xff51afd7ed558ccd;
-    h1 ^= h1 >> 33;
-    h1 *= 0xc4ceb9fe1a85ec53;
-    h1 ^= h1 >> 33;
-
-    return h1;
-}
-
-static inline uint64_t encode_kmer_murmur(const char *seq, int k)
-{
-    // even if the sequence is larger, we only store up to k
-    char kmer[k];
-    for (int i = 0; i < k; i++)
-    {
-        kmer[i] = base_map[(uint8_t)seq[i]];
-    }
-
-    uint64_t hash1 = murmurhash3(kmer, k, 0);
-    // printf("kmer %s hash1 %u hash2 %u\n", seq, hash1, hash2);
-    return hash1;
-}
-
 /////////////////
 
 static inline uint64_t encode_kmer_plain(const char *kmer, int k)
@@ -802,29 +850,6 @@ char decode_kmer_plain(uint64_t encoded, int k, char *kmer)
         encoded >>= 2;
     }
     kmer[k] = '\0';
-}
-
-/////////////////
-
-static inline uint64_t mix_bits(uint64_t hash)
-{
-    hash ^= (hash >> 33);
-    hash *= 0xff51afd7ed558ccd;
-    hash ^= (hash >> 33);
-    hash *= 0xc4ceb9fe1a85ec53;
-    hash ^= (hash >> 33);
-    return hash;
-}
-
-static inline uint64_t kmer_hash_fnv(const char *seq, int k)
-{
-    uint64_t hash = 0xcbf29ce484222325;
-    for (int i = 0; i < k; i++)
-    {
-        hash ^= base_map[(uint8_t)seq[i]];
-        hash *= 0x100000001b3;
-    }
-    return mix_bits(hash);
 }
 
 /////////////////
@@ -874,6 +899,68 @@ const char *get_canonical_kmer(const char *kmer, int k)
 ////////////////////////////////////////////////////////////////
 ///////////////// DATA PROCESSING //////////////////////////////
 ////////////////////////////////////////////////////////////////
+size_t find_thread_start(char *data, size_t start_pos, size_t end_pos)
+{
+    int line_break_count = 0;
+
+    // loop backwards
+    for (size_t i = end_pos; i > start_pos; i--)
+    {
+        if (data[i] == '\n')
+        {
+            line_break_count++;
+            if (cfg.is_input_fastq == true)
+            {
+                // if we've encountered three newlines, qual header + and seq @ header found
+                if (line_break_count == 3 && data[i + 1] == '+' && data[i - 2] == '@')
+                {
+                    return i - 2; // return @ position, ie. start of next thread
+                }
+            }
+            else // fasta, reading 2 lines at a time, > at start of first line
+            {
+                if (line_break_count == 1 && data[0] == '>')
+                {
+                    return i - 1; // return pos of >, start of the next thread
+                }
+            }
+        }
+    }
+    // chatgpt told me that if no valid start is found, default to start_pos
+    return start_pos;
+}
+void calculate_thread_positions(char *data, size_t total_file_size, int thread_count, size_t **thread_starts, size_t **thread_ends)
+{
+    size_t approx_chunk_size = total_file_size / thread_count;
+    size_t approximate_end = approx_chunk_size - (MAX_LINE_LENGTH * 4);
+
+    *thread_starts = malloc(thread_count * sizeof(size_t));
+    *thread_ends = malloc(thread_count * sizeof(size_t));
+    // we reuse the arrays
+
+    if (*thread_starts == NULL || *thread_ends == NULL)
+    {
+        perror("Error allocating memory for thread positions");
+        exit(EXIT_FAILURE);
+    }
+
+    (*thread_starts)[0] = 0; // first thread starts at beginning.
+
+    for (int i = 1; i < thread_count; i++)
+    {
+        // reset as we're reusing
+        (*thread_starts)[i] = 0;
+
+        size_t start_pos = (*thread_starts)[i - 1];
+        size_t end_pos = start_pos + approximate_end;
+        (*thread_starts)[i] = find_thread_start(data, start_pos, end_pos);
+        // gpt says End of current thread is just before the start of the next
+        (*thread_ends)[i - 1] = (*thread_starts)[i] - 1;
+    }
+
+    // last thread ends at the end of the file
+    (*thread_ends)[thread_count - 1] = total_file_size - 1;
+}
 
 void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id)
 {
@@ -882,7 +969,13 @@ void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM
     replacestr(seq, "N", "A");
     int seq_len = strlen(seq);
 
-    if (seq_len >= K && valid_dna(seq))
+    if (valid_dna(seq) == false)
+    {
+        printf("FATAL: sequence does not appear to be a DNA sequence\n%s\n\n", seq);
+        exit(EXIT_FAILURE);
+    }
+
+    if (seq_len >= K)
     {
         for (int i = 0; i <= seq_len - K; i++)
         {
@@ -890,30 +983,29 @@ void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM
             strncpy(kmer, seq + i, K);
             kmer[K] = '\0';
 
-            // printf("sequence is %s\n", kmer);
             uint64_t hash = 0;
 
             if (cfg.canonical == 1)
             {
                 const char *canonical_kmer = get_canonical_kmer(kmer, K);
-                // hash = encode_kmer_murmur(canonical_kmer, K);
                 hash = encode_kmer_plain(canonical_kmer, K);
             }
             else
             {
-                // hash = encode_kmer_murmur(kmer, K);
                 hash = encode_kmer_plain(kmer, K);
             }
 
             if (hash == 0)
                 continue;
 
-            // uint8_t first_base = base_map[(uint8_t)seq[0]];
-            // hash_table_t *used_hash_table = &hash_table[first_base];
-
             (*total_seq_kmers)++;
-            int index = store_kmer(hash_table, hash, thread_id);
+            size_t index = store_kmer(hash_table, hash, thread_id);
 
+            if (index < 0)
+            {
+                fprintf(stderr, "ERROR3: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
+                exit(EXIT_FAILURE);
+            }
             if (hash_table->entries[index].count >= NORM_DEPTH)
             {
                 (*seq_high_count_kmers)++;
@@ -925,35 +1017,31 @@ void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM
 void *process_thread_chunk(void *arg)
 {
     thread_data_t *data = (thread_data_t *)arg;
-    char *forward_ptr = data->forward_ptr;
-    char *reverse_ptr = data->reverse_ptr;
-    size_t forward_size = data->forward_size;
-    size_t reverse_size = data->reverse_size;
+    // generic
+    int lines_to_read = cfg.is_input_fastq == true ? 4 : 2;
+    char forward_record[lines_to_read][MAX_LINE_LENGTH], reverse_record[lines_to_read][MAX_LINE_LENGTH];
     hash_table_t *local_hash_table = data->hash_table;
     int thread_id = data->thread_id;
     FILE *output_forward = data->thread_output_forward;
     FILE *output_reverse = data->thread_output_reverse;
 
-    int lines_to_read = strcmp(cfg.filetype, "fa") == 0 ? 2 : 4;
-    char forward_record[lines_to_read][MAX_SEQ_LENGTH], reverse_record[lines_to_read][MAX_SEQ_LENGTH];
+    // input file
+    char *forward_pointer = data->forward_data + data->forward_file_start;
+    char *reverse_pointer = data->reverse_data + data->reverse_file_start;
 
     // thread stats
     size_t total_kmers = data->hash_table->used;
     int processed_count = 0, printed_count = 0, skipped_count = 0, prev_printed_count = data->printed_count, prev_skipped_count = data->skipped_count;
     size_t prev_total_kmers = total_kmers, sequences_last_processed = data->processed_count;
     double prev_rate = 0;
-
-    if (cfg.verbose)
-    {
-        printf("Thread %d started; processing %d lines per record\n", thread_id, lines_to_read);
-    }
-
     size_t sequences_processed = 0;
     time_t current_time = time(NULL);
 
-    // report every 60 seconds
+    if (cfg.verbose)
+        printf("Thread %d started; processing %d lines per record\n", thread_id, lines_to_read);
 
-    while (forward_ptr < data->forward_ptr + forward_size && reverse_ptr < data->reverse_ptr + reverse_size)
+    while (forward_pointer < data->forward_data + data->forward_file_end &&
+           reverse_pointer < data->reverse_data + data->reverse_file_end)
     {
 
         bool valid_record = true;
@@ -964,10 +1052,11 @@ void *process_thread_chunk(void *arg)
         // read pair
         for (int i = 0; i < lines_to_read; i++)
         {
-            forward_ptr = read_line(forward_ptr, forward_record[i], MAX_SEQ_LENGTH);
-            reverse_ptr = read_line(reverse_ptr, reverse_record[i], MAX_SEQ_LENGTH);
+            // store data into record, update pointer
+            forward_pointer = read_line(forward_pointer, forward_record[i], MAX_LINE_LENGTH);
+            reverse_pointer = read_line(reverse_pointer, reverse_record[i], MAX_LINE_LENGTH);
 
-            if (!forward_ptr || !reverse_ptr)
+            if (!forward_pointer || !reverse_pointer)
             {
                 valid_record = false;
                 break;
@@ -975,6 +1064,17 @@ void *process_thread_chunk(void *arg)
         }
         if (!valid_record)
             break;
+
+        if (lines_to_read == 4 && strlen(forward_record[1]) != strlen(forward_record[3]))
+        {
+            printf("ERROR! fwd sequence line and quality line are not the same size\n1:\t%s\n2:\t%s\n3:\t%s\n4:\t%s\n\n", forward_record[0], forward_record[1], forward_record[2], forward_record[3]);
+            exit(EXIT_FAILURE);
+        }
+        if (lines_to_read == 4 && strlen(reverse_record[1]) != strlen(reverse_record[3]))
+        {
+            printf("ERROR! rev sequence line and quality line are not the same size\n1:\t%s\n2:\t%s\n3:\t%s\n4:\t%s\n\n", reverse_record[0], reverse_record[1], reverse_record[2], reverse_record[3]);
+            exit(EXIT_FAILURE);
+        }
 
         if (cfg.debug > 2)
         {
@@ -1006,10 +1106,23 @@ void *process_thread_chunk(void *arg)
         bool is_printed = false;
         if (high_count_ratio <= cfg.coverage)
         {
-            for (int i = 0; i < lines_to_read; i++)
+            if (cfg.is_input_fastq == true && cfg.is_output_fastq == false)
             {
-                fprintf(output_forward, "%s\n", forward_record[i]);
-                fprintf(output_reverse, "%s\n", reverse_record[i]);
+                char forward_record_fasta[MAX_LINE_LENGTH * 2] = {0};
+                fastq_to_fasta(&forward_record, forward_record_fasta, true);
+
+                char reverse_record_fasta[MAX_LINE_LENGTH * 2] = {0};
+                fastq_to_fasta(&reverse_record, reverse_record_fasta, false);
+                fprintf(output_forward, "%s", forward_record_fasta);
+                fprintf(output_reverse, "%s", reverse_record_fasta);
+            }
+            else
+            {
+                for (int i = 0; i < lines_to_read; i++)
+                {
+                    fprintf(output_forward, "%s\n", forward_record[i]);
+                    fprintf(output_reverse, "%s\n", reverse_record[i]);
+                }
             }
             data->printed_count++;
             is_printed = true;
@@ -1032,7 +1145,7 @@ void *process_thread_chunk(void *arg)
             {
                 printf("Thread %d - Sequence pair %'zu SKIPPED: ", thread_id, data->processed_count);
             }
-            printf("High (%d) count kmers: F:%d;R:%d;B:%d, Total kmers: F:%d;R:%d;B:%d, High (%d) count ratio: %.2f\n",
+            printf("High (%d) count kmers: F:%d;R:%d;B:%d, Total unique kmers: F:%d;R:%d;B:%d, High (%d) count ratio: %.2f\n",
                    cfg.depth,
                    seq_high_count_kmers_forward,
                    seq_high_count_kmers_reverse, seq_high_count_kmers,
@@ -1042,31 +1155,29 @@ void *process_thread_chunk(void *arg)
         }
         sequences_processed++;
 
+        current_time = time(NULL);
         if (difftime(current_time, data->last_report_time) >= REPORTING_INTERVAL)
         {
             if (cfg.debug > 1)
                 printf("reporting after %d seconds\n", REPORTING_INTERVAL);
-            current_time = time(NULL);
+
             double elapsed_time = difftime(current_time, data->last_report_time);
             sequences_last_processed = data->processed_count - data->last_report_count;
             double rate = sequences_last_processed / elapsed_time;
             total_kmers = local_hash_table->used;
 
-            if (prev_total_kmers > 0 || prev_printed_count > 0 || prev_skipped_count > 0)
-            {
-                float printed_improvement = (prev_printed_count == 0) ? 0 : (float)(data->printed_count - prev_printed_count) / prev_printed_count;
-                float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
-                float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
-                float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
-                printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences per second, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total kmers across all sequences: %'zu (%+.2f%%)\n",
-                       thread_id, rate, prev_rate_improvement * 100,
-                       data->processed_count,
-                       data->printed_count,
-                       printed_improvement * 100,
-                       data->skipped_count,
-                       skipped_improvement * 100,
-                       total_kmers, kmer_improvement * 100);
-            }
+            float printed_improvement = (prev_printed_count == 0) ? 0 : (float)(data->printed_count - prev_printed_count) / prev_printed_count;
+            float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
+            float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
+            float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
+            printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences per second, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total unique kmers across all sequences: %'zu (%+.2f%%)\n",
+                   thread_id, rate, prev_rate_improvement * 100,
+                   data->processed_count,
+                   data->printed_count,
+                   printed_improvement * 100,
+                   data->skipped_count,
+                   skipped_improvement * 100,
+                   total_kmers, kmer_improvement * 100);
 
             prev_total_kmers = total_kmers;
             prev_printed_count = data->printed_count;
@@ -1090,7 +1201,7 @@ void *process_thread_chunk(void *arg)
     float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
     float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
     float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
-    printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences per second, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total kmers across all sequences: %'zu (%+.2f%%)\n",
+    printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences per second, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total unique kmers across all sequences: %'zu (%+.2f%%)\n",
            thread_id, rate, prev_rate_improvement * 100,
            data->processed_count,
            data->printed_count,
@@ -1112,18 +1223,19 @@ void *process_thread_chunk(void *arg)
 
 int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap)
 {
-    char stop_char = strcmp(cfg.filetype, "fa") == 0 ? '>' : '@';
+    char stop_char = cfg.is_input_fastq == false ? '>' : '@';
 
     pthread_t threads[cfg.cpus];
 
-    size_t total_file_size = forward_mmap->size;
-    size_t approx_chunk_size = total_file_size / cfg.cpus;
-    char *forward_end = forward_mmap->data + total_file_size;
-    char *reverse_end = reverse_mmap->data + reverse_mmap->size;
+    // let's get start and ends for the mmapped file.
+    size_t *forward_thread_starts = NULL;
+    size_t *forward_thread_ends = NULL;
+    calculate_thread_positions(forward_mmap->data, forward_mmap->size, cfg.cpus, &forward_thread_starts, &forward_thread_ends);
+    size_t *reverse_thread_starts = NULL;
+    size_t *reverse_thread_ends = NULL;
+    calculate_thread_positions(reverse_mmap->data, reverse_mmap->size, cfg.cpus, &reverse_thread_starts, &reverse_thread_ends);
 
-    char *forward_start = forward_mmap->data;
-    char *reverse_start = reverse_mmap->data;
-
+    // reporting
     size_t processed_count;
     size_t printed_count;
     size_t skipped_count;
@@ -1131,107 +1243,11 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
     int last_report_count;
     int thread_sync_interval;
 
-    for (int i = 0; i < cfg.cpus; i++)
-    {
-
-        if (cfg.debug > 1)
-            printf("Starting thread %d\n", i);
-
-
-
-        char *forward_chunk_end = (i == cfg.cpus - 1) ? forward_end : find_next_record_start(forward_start + approx_chunk_size, forward_end, stop_char);
-        char *reverse_chunk_end = (i == cfg.cpus - 1) ? reverse_end : find_next_record_start(reverse_start + approx_chunk_size, reverse_end, stop_char);
-
-        thread_data[i].forward_ptr = forward_start;
-        thread_data[i].reverse_ptr = reverse_start;
-        thread_data[i].forward_size = forward_chunk_end - forward_start;
-        thread_data[i].reverse_size = reverse_chunk_end - reverse_start;
-
-        if (!thread_data[i].thread_output_forward || !thread_data[i].thread_output_reverse)
-        {
-            fprintf(stderr, "Error opening thread-specific output files for thread %d, %s and %s\n", i, thread_data[i].thread_output_forward_filename, thread_data[i].thread_output_reverse_filename);
-            exit(EXIT_FAILURE);
-        }
-
-        // printf("forward/reverse size %zu/%zu chunk %s/%s\n", thread_data[i].forward_size, thread_data[i].reverse_size, forward_chunk_end, reverse_chunk_end);
-
-        if (pthread_create(&threads[i], NULL, process_thread_chunk, &thread_data[i]) != 0)
-        {
-            fprintf(stderr, "Error creating thread %d\n", i);
-            for (int j = 0; j < i; j++)
-            {
-                pthread_cancel(threads[j]);
-                pthread_join(threads[j], NULL);
-            }
-            return 1;
-        }
-
-        forward_start = forward_chunk_end;
-        reverse_start = reverse_chunk_end;
-        sleep(1);
-    }
-
-    // close
-    for (int i = 0; i < cfg.cpus; i++)
-    {
-        if (pthread_join(threads[i], NULL) != 0)
-        {
-            fprintf(stderr, "Error joining thread %d\n", i);
-            return 1;
-        }
-    }
-
-    // Generate final report
-    size_t total_processed = 0, total_printed = 0, total_skipped = 0;
-    for (int i = 0; i < cfg.cpus; i++)
-    {
-        total_processed += thread_data[i].processed_count;
-        total_printed += thread_data[i].printed_count;
-        total_skipped += thread_data[i].skipped_count;
-    }
-    reporting.total_processed = total_processed;
-    reporting.total_printed = total_printed;
-    reporting.total_skipped = total_skipped;
-    reporting.files_processed++;
-
-    printf("File's statistics: Processed %'zu, Printed %'zu, Skipped %'zu\n",
-           total_processed, total_printed, total_skipped);
-
-    return 0;
-}
-
-////////////////////////////////////////////////////////////////
-/////////////// MAIN ///////////////////////////////////////////
-////////////////////////////////////////////////////////////////
-
-int main(int argc, char *argv[])
-{
-    setlocale(LC_ALL, "");
-    memset(&reporting, 0, sizeof(struct reporting_t));
-    reporting.total_processed = 0;
-    reporting.total_printed = 0;
-    reporting.total_skipped = 0;
-    reporting.total_kmers = 0;
-    reporting.files_processed = 0;
-
-    memset(&cfg, 0, sizeof(struct config_t));
-    if (!parse_arguments(argc, argv))
-    {
-        printf("Issue parsing options\n");
-        print_usage(argv[0]);
-        return 1;
-    }
-
-    // for (int i=0;i<NUM_PARTITIONS;i++){
-    //     init_hash_table(&global_hash_tables[i]);
-    // }
-
-    // initialise the output files for each thread (otherwise we'd need to open as append)
-    // every thread prints to its own file
-
-    thread_data_t thread_data[cfg.cpus];
     for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
     {
+
+        // initialise the output files for each thread (otherwise we'd need to open as append)
+        // every thread prints to its own file
         thread_data[thread_number].thread_output_forward_filename = NULL;
         thread_data[thread_number].thread_output_reverse_filename = NULL;
         thread_data[thread_number].thread_output_forward_filename = create_output_filename("output_forward", cfg.ksize, cfg.depth, thread_number);
@@ -1259,8 +1275,9 @@ int main(int argc, char *argv[])
         thread_data[thread_number].last_report_time = time(NULL);
         thread_data[thread_number].last_report_count = 0;
 
-        thread_data[thread_number].forward_ptr = NULL;
-        thread_data[thread_number].reverse_ptr = NULL;
+        // if i wanted to split hash tables
+        // for (int i=0;i<NUM_PARTITIONS;i++){ init_hash_table(&global_hash_tables[i]); }
+        // etc
 
         thread_data[thread_number].hash_table = malloc(sizeof(hash_table_t));
         if (!thread_data[thread_number].hash_table)
@@ -1270,15 +1287,107 @@ int main(int argc, char *argv[])
         }
         init_hash_table(thread_data[thread_number].hash_table);
 
-        // thread_data[i].hash_table = &global_hash_table; // pointer,
-        // for (int m = 0; i < NUM_PARTITIONS; m++)
-        // {
-        //     thread_data[i].hash_tables[m] = NULL;
-        //     thread_data[i].hash_tables[m] = copy_hash_table(&global_hash_tables[m]);
-        // }
-        // printf("MAIN2: Is the global table empty? %s\n", is_hash_table_empty(&global_hash_table) ? "true" : "false");
-        // printf("MAIN3: Is the local table of thread %d empty? %s\n", i, is_hash_table_empty(thread_data[i].hash_table) ? "true" : "false");
+        // store memory mapped file starts and stops, and data structure.
+        thread_data[thread_number].forward_file_start = forward_thread_starts[thread_number];
+        thread_data[thread_number].forward_file_end = forward_thread_ends[thread_number];
+        thread_data[thread_number].reverse_file_start = reverse_thread_starts[thread_number];
+        thread_data[thread_number].reverse_file_end = reverse_thread_ends[thread_number];
+        thread_data[thread_number].forward_data = forward_mmap->data;
+        thread_data[thread_number].reverse_data = reverse_mmap->data;
+
+        if (!thread_data[thread_number].thread_output_forward || !thread_data[thread_number].thread_output_reverse)
+        {
+            fprintf(stderr, "Error opening thread-specific output files for thread %d, %s and %s\n", thread_number, thread_data[thread_number].thread_output_forward_filename, thread_data[thread_number].thread_output_reverse_filename);
+            exit(EXIT_FAILURE);
+        }
+
+        // printf("forward/reverse size %zu/%zu chunk %s/%s\n", thread_data[i].forward_size, thread_data[i].reverse_size, forward_chunk_end, reverse_chunk_end);
+
+        if (cfg.debug > 1)
+            printf("Starting thread %d\n", thread_number);
+
+        if (pthread_create(&threads[thread_number], NULL, process_thread_chunk, &thread_data[thread_number]) != 0)
+        {
+
+            fprintf(stderr, "Error creating thread %d\n", thread_number);
+            for (int j = 0; j < thread_number; j++)
+            {
+                pthread_cancel(threads[j]);
+                pthread_join(threads[j], NULL);
+            }
+            free(forward_thread_starts);
+            free(forward_thread_ends);
+            free(reverse_thread_starts);
+            free(reverse_thread_ends);
+            return 1;
+        }
+
+        sleep(1);
     }
+
+    // close
+    for (int i = 0; i < cfg.cpus; i++)
+    {
+        if (pthread_join(threads[i], NULL) != 0)
+        {
+            fprintf(stderr, "Error joining thread %d\n", i);
+            free(forward_thread_starts);
+            free(forward_thread_ends);
+            free(reverse_thread_starts);
+            free(reverse_thread_ends);
+            return 1;
+        }
+    }
+
+    // final report
+    size_t total_processed = 0, total_printed = 0, total_skipped = 0;
+    for (int i = 0; i < cfg.cpus; i++)
+    {
+        total_processed += thread_data[i].processed_count;
+        total_printed += thread_data[i].printed_count;
+        total_skipped += thread_data[i].skipped_count;
+    }
+    reporting.total_processed = total_processed;
+    reporting.total_printed = total_printed;
+    reporting.total_skipped = total_skipped;
+    reporting.files_processed++;
+
+    printf("File's statistics: Processed %'zu, Printed %'zu, Skipped %'zu\n",
+           total_processed, total_printed, total_skipped);
+
+    free(forward_thread_starts);
+    free(forward_thread_ends);
+    free(reverse_thread_starts);
+    free(reverse_thread_ends);
+
+    return 0;
+}
+
+////////////////////////////////////////////////////////////////
+/////////////// MAIN ///////////////////////////////////////////
+////////////////////////////////////////////////////////////////
+
+int main(int argc, char *argv[])
+{
+    setlocale(LC_ALL, "");
+    memset(&reporting, 0, sizeof(struct reporting_t));
+    reporting.total_processed = 0;
+    reporting.total_printed = 0;
+    reporting.total_skipped = 0;
+    reporting.total_kmers = 0;
+    reporting.files_processed = 0;
+
+    memset(&cfg, 0, sizeof(struct config_t));
+    if (!parse_arguments(argc, argv))
+    {
+        printf("Issue parsing options\n");
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    thread_data_t thread_data[cfg.cpus];
+
+    // start processing files
     time_t start_time = time(NULL);
 
     for (int file_index = 0; file_index < cfg.forward_file_count; file_index++)
@@ -1297,6 +1406,7 @@ int main(int argc, char *argv[])
         if (multithreaded_process_files(thread_data, &forward_mmap, &reverse_mmap) != 0)
         {
             fprintf(stderr, "Error processing files\n");
+
             munmap_file(&forward_mmap);
             munmap_file(&reverse_mmap);
             goto cleanup;
@@ -1304,6 +1414,8 @@ int main(int argc, char *argv[])
         munmap_file(&forward_mmap);
         munmap_file(&reverse_mmap);
     }
+
+    // closeup and free data used across all files.
     for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
     {
         fclose(thread_data[thread_number].thread_output_forward);
@@ -1318,10 +1430,10 @@ int main(int argc, char *argv[])
     printf("Processed Records: %'zu\n", reporting.total_processed);
     printf("Printed Records: %'zu\n", reporting.total_printed);
     printf("Skipped Records: %'zu\n", reporting.total_skipped);
-    printf("Total kmers across all sequences: %'zu\n", reporting.total_kmers);
+    // we can't get this if we have multiple threads unless we merge the tables, is it worth it?
+    //    printf("Total unique kmers across all sequences: %'zu\n", reporting.total_kmers);
 
 cleanup:
-    // Clean up
     for (int thread_number = 0; thread_number < cfg.forward_file_count; thread_number++)
     {
         free(cfg.forward_files[thread_number]);
@@ -1332,16 +1444,15 @@ cleanup:
 
     time_t end_time = time(NULL);
     double total_runtime = difftime(end_time, start_time);
-    printf("Program completed, cleaning up.\n");
     printf("Total runtime: %.2f seconds\n", total_runtime);
-    // if (total_processed > 0)
-    // {
-    //     double processing_rate = total_processed / total_runtime;
-    //     printf("Overall processing rate: %.2f sequences per second\n", processing_rate);
-    // }
-    // else
-    // {
-    //     printf("No data processed\n");
-    // }
+    if (reporting.total_processed > 0)
+    {
+        double processing_rate = reporting.total_processed / total_runtime;
+        printf("Overall processing rate: %'.0f sequences per second\n", processing_rate);
+    }
+    else
+    {
+        printf("No data processed\n");
+    }
     return 0;
 }

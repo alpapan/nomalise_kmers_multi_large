@@ -12,20 +12,17 @@
 #include <getopt.h>
 #include <stdbool.h>
 
-/// registry of allocs (malloc realloc calloc)
-// output_filename
-// hash_table_t
-// hash_table_t->entries
-// forward_ptr
-// reverse_ptr
-// cfg.forward_files
-// cfg.reverse_files
-
-// Todo: memory option in gb instead of hash entries?
+// use plain hash
+// organise
+// remove redumdant code
+// support trinity output
+// ensure records are read 2/4 lines at a time
+// support gz bz2 input will be hard because of record boundaries
+// support gz bz2 output will be easier
 
 // #define INITIAL_CAPACITY 500000003 // 7.5gb per cpu equiv genome/transcriptome size; should be a prime number; remember we do not convert to canonical kmers (as this was create for rnaseq)
 #define INITIAL_CAPACITY 150000001 // 2.3gb good starting value for a transcriptome, esp if stranded
-#define MAX_SEQ_LENGTH 400
+#define MAX_LINE_LENGTH 1024
 #define CHUNK_SIZE 1000000
 #define MAX_THREADS 256
 // #define SYNC_INTERVAL 100000 // how many seqs/often to sync the kmer tables of each thread, this inits the thread-specific sync interval which increases with more data.
@@ -100,7 +97,7 @@ struct config_t
     int depth;
     float coverage;
     int verbose;
-    char *filetype;
+    char *informat;
     int cpus;
     int help;
     int debug;
@@ -128,7 +125,7 @@ size_t expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread
 static inline uint64_t encode_kmer_murmur(const char *seq, int k);
 char *create_output_filename(const char *basename, int k, int norm_depth, int thread);
 int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
-int store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id);
+size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id);
 void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id);
 void print_usage(char *program_name);
 int parse_arguments(int argc, char *argv[]);
@@ -260,7 +257,7 @@ int parse_arguments(int argc, char *argv[])
     cfg.coverage = 0.9;
     cfg.verbose = 0;
     cfg.debug = 0;
-    cfg.filetype = "fq";
+    cfg.informat = "fq";
     cfg.cpus = 4;
     cfg.help = 0;
     cfg.forward_file_count = 0;
@@ -333,7 +330,7 @@ int parse_arguments(int argc, char *argv[])
             cfg.verbose = 1;
             break;
         case 't':
-            cfg.filetype = optarg;
+            cfg.informat = optarg;
             break;
         default:
             fprintf(stderr, "Unexpected error in option processing\n");
@@ -729,7 +726,7 @@ char *create_output_filename(const char *basename, int k, int norm_depth, int th
     return output_filename;
 }
 
-int store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
+size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
 {
     // this happens locally on a thread specific hash_table so no requirement to do any locking
 
@@ -739,12 +736,24 @@ int store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
     }
 
     size_t index = hash % hash_table->capacity;
+    if (index < 0)
+    {
+        fprintf(stderr, "ERROR1: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
+        exit(EXIT_FAILURE);
+    }
+
     size_t original_index = index;
     uint64_t offset = find_hash_offset(hash, hash_table->capacity);
 
     while (hash_table->entries[index].hash != 0 && hash_table->entries[index].hash != hash)
     {
         index = (index + offset) % hash_table->capacity;
+        if (index < 0)
+        {
+            fprintf(stderr, "ERROR2: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
+            exit(EXIT_FAILURE);
+        }
+
         if (index == 0)
         {
             if (cfg.debug)
@@ -822,7 +831,12 @@ void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM
             // hash_table_t *used_hash_table = &hash_table[first_base];
 
             (*total_seq_kmers)++;
-            int index = store_kmer(hash_table, hash, thread_id);
+            size_t index = store_kmer(hash_table, hash, thread_id);
+            if (index < 0)
+            {
+                fprintf(stderr, "ERROR1: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
+                exit(EXIT_FAILURE);
+            }
 
             if (hash_table->entries[index].count >= NORM_DEPTH)
             {
@@ -886,6 +900,43 @@ char *find_next_record_start(char *ptr, char *end_ptr, char stop_char)
     return (ptr < end_ptr) ? ptr : NULL;
 }
 
+// faster and checks for both stop char and number of lines (thanks gpt!)
+char *adjust_chunk_to_record_boundary(char *start_ptr, char *end_ptr, size_t approx_chunk_size, char stop_char)
+{
+    char *chunk_end_ptr = start_ptr + approx_chunk_size;
+    int lines_to_read = strcmp(cfg.informat, "fa") == 0 ? 2 : 4;
+
+    if (chunk_end_ptr > end_ptr)
+    {
+        chunk_end_ptr = end_ptr;
+    }
+
+    size_t lines_count = 0;
+    char *ptr = start_ptr;
+
+    // Iterate over the data until the end of the chunk or end of data
+    while (ptr < chunk_end_ptr)
+    {
+        // Use a direct pointer increment to find the next newline
+        while (ptr < chunk_end_ptr && *ptr != '\n')
+        {
+            ptr++;
+        }
+        if (ptr < chunk_end_ptr)
+        {
+            lines_count++;
+            ptr++; // Move past the newline
+            // Update chunk_end_ptr only when a complete record is found
+            if (lines_count % lines_to_read == 0)
+            {
+                chunk_end_ptr = ptr;
+            }
+        }
+    }
+
+    return chunk_end_ptr;
+}
+
 static void replacestr(const char *line, const char *search, const char *replace)
 {
     char *sp;
@@ -926,8 +977,8 @@ void *process_thread_chunk(void *arg)
     FILE *output_forward = data->thread_output_forward;
     FILE *output_reverse = data->thread_output_reverse;
 
-    int lines_to_read = strcmp(cfg.filetype, "fa") == 0 ? 2 : 4;
-    char forward_record[lines_to_read][MAX_SEQ_LENGTH], reverse_record[lines_to_read][MAX_SEQ_LENGTH];
+    int lines_to_read = strcmp(cfg.informat, "fa") == 0 ? 2 : 4;
+    char forward_record[lines_to_read][MAX_LINE_LENGTH], reverse_record[lines_to_read][MAX_LINE_LENGTH];
 
     // thread stats
     size_t total_kmers = data->hash_table->used;
@@ -956,8 +1007,8 @@ void *process_thread_chunk(void *arg)
         // read pair
         for (int i = 0; i < lines_to_read; i++)
         {
-            forward_ptr = read_line(forward_ptr, forward_record[i], MAX_SEQ_LENGTH);
-            reverse_ptr = read_line(reverse_ptr, reverse_record[i], MAX_SEQ_LENGTH);
+            forward_ptr = read_line(forward_ptr, forward_record[i], MAX_LINE_LENGTH);
+            reverse_ptr = read_line(reverse_ptr, reverse_record[i], MAX_LINE_LENGTH);
 
             if (!forward_ptr || !reverse_ptr)
             {
@@ -1026,7 +1077,7 @@ void *process_thread_chunk(void *arg)
             {
                 printf("Thread %d - Sequence pair %'zu SKIPPED: ", thread_id, data->processed_count);
             }
-            printf("High (%d) count kmers: F:%d;R:%d;B:%d, Total kmers: F:%d;R:%d;B:%d, High (%d) count ratio: %.4f\n",
+            printf("High (%d) count kmers: F:%d;R:%d;B:%d, Total unique kmers: F:%d;R:%d;B:%d, High (%d) count ratio: %.4f\n",
                    cfg.depth,
                    seq_high_count_kmers_forward,
                    seq_high_count_kmers_reverse, seq_high_count_kmers,
@@ -1045,31 +1096,28 @@ void *process_thread_chunk(void *arg)
             double rate = sequences_processed / elapsed_time;
             total_kmers = local_hash_table->used;
 
+            float printed_improvement = (prev_printed_count == 0) ? 0 : (float)(data->printed_count - prev_printed_count) / prev_printed_count;
+            float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
+            float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
+            float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
+            printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences per second, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total unique kmers across all sequences: %'zu (%+.2f%%)\n",
+                   thread_id, rate, prev_rate_improvement * 100,
+                   data->processed_count,
+                   data->printed_count,
+                   printed_improvement * 100,
+                   data->skipped_count,
+                   skipped_improvement * 100,
+                   total_kmers, kmer_improvement * 100);
+
             // once we hit a million skipped and skipped > printed then double the data->thread_sync_interval but only once
             // TODO: perhaps this should be a function of kmer_improvement, at some point we are not seeing many new kmers.
-
-            if (prev_total_kmers > 0 || prev_printed_count > 0 || prev_skipped_count > 0)
+            if (sync_frequency_round == 0 && kmer_improvement < 0.10)
             {
-
-                float printed_improvement = (prev_printed_count == 0) ? 0 : (float)(data->printed_count - prev_printed_count) / prev_printed_count;
-                float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
-                float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
-                float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
-                printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences per second, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total kmers across all sequences: %'zu (%+.2f%%)\n",
-                       thread_id, rate, prev_rate_improvement * 100,
-                       data->processed_count,
-                       data->printed_count,
-                       printed_improvement * 100,
-                       data->skipped_count,
-                       skipped_improvement * 100,
-                       total_kmers, kmer_improvement * 100);
-                if (sync_frequency_round == 0 && kmer_improvement < 0.10)
-                {
-                    sync_frequency_round++;
-                    data->thread_sync_interval = SYNC_INTERVAL * 2;
-                    if (cfg.debug)
-                        printf("Thread %d: Increasing current sync frequency by 10x to %'d\n", thread_id, data->thread_sync_interval);
-                }
+                sync_frequency_round++;
+                data->thread_sync_interval = SYNC_INTERVAL * 2;
+                if (cfg.debug)
+                    printf("Thread %d: Increasing current sync frequency by 10x to %'d\n", thread_id, data->thread_sync_interval);
+            }
                 else if (sync_frequency_round == 1 && data->skipped_count > 1e6 && data->skipped_count > data->printed_count)
                 {
                     sync_frequency_round++;
@@ -1084,7 +1132,6 @@ void *process_thread_chunk(void *arg)
                     if (cfg.debug)
                         printf("Thread %d: Increasing current sync frequency by 2x to %'d\n", thread_id, data->thread_sync_interval);
                 }
-            }
             prev_total_kmers = total_kmers;
             prev_printed_count = data->printed_count;
             prev_skipped_count = data->skipped_count;
@@ -1112,7 +1159,7 @@ void *process_thread_chunk(void *arg)
     float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
     float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
     float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
-    printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences per second, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total kmers across all sequences: %'zu (%+.2f%%)\n",
+    printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences per second, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total unique kmers across all sequences: %'zu (%+.2f%%)\n",
            thread_id, rate, prev_rate_improvement * 100,
            data->processed_count,
            data->printed_count,
@@ -1137,7 +1184,7 @@ void *process_thread_chunk(void *arg)
 
 int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap)
 {
-    char stop_char = strcmp(cfg.filetype, "fa") == 0 ? '>' : '@';
+    char stop_char = strcmp(cfg.informat, "fa") == 0 ? '>' : '@';
 
     pthread_t threads[cfg.cpus];
 
@@ -1475,7 +1522,7 @@ int main(int argc, char *argv[])
     printf("Processed Records: %'zu\n", reporting.total_processed);
     printf("Printed Records: %'zu\n", reporting.total_printed);
     printf("Skipped Records: %'zu\n", reporting.total_skipped);
-    printf("Total kmers across all sequences: %'zu\n", reporting.total_kmers);
+    printf("Total unique kmers across all sequences: %'zu\n", reporting.total_kmers);
 
 cleanup:
     // Clean up

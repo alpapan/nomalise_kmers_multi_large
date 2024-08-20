@@ -2,19 +2,19 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "norm kmer multiple small files",
+      "name": "multiple small files, threaded",
       "type": "cppdbg",
       "request": "launch",
       "program": "${fileDirname}/${fileBasenameNoExtension}",
       "args": [
         "--forward",
-        "a1",
-        "a2",
+        "a1.fastq",
+        "a2.fastq",
         "--reverse",
-        "b1",
-        "b2",
+        "b1.fastq",
+        "b2.fastq",
         "--depth",
-        "2",
+        "4",
         "--verbose",
         "--debug",
         "1",
@@ -39,44 +39,7 @@
       "miDebuggerPath": "/usr/bin/gdb"
     },
     {
-      "name": "norm kmer two files 2 threads",
-      "type": "cppdbg",
-      "request": "launch",
-      "program": "${fileDirname}/${fileBasenameNoExtension}",
-      "args": [
-        "--forward",
-        "forward.fastq",
-        "forward2.fastq",
-        "--reverse",
-        "reverse.fastq",
-        "reverse2.fastq",
-        "--depth",
-        "2",
-        "--verbose",
-        "--debug",
-        "1",
-        "-p",
-        "2",
-        "-m",
-        "2"
-      ],
-      "stopAtEntry": false,
-      "cwd": "${workspaceFolder}",
-      "environment": [],
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "setupCommands": [
-        {
-          "description": "Enable pretty-printing for gdb",
-          "text": "-enable-pretty-printing",
-          "ignoreFailures": true
-        }
-      ],
-      "preLaunchTask": "gcc build active file",
-      "miDebuggerPath": "/usr/bin/gdb"
-    },
-    {
-      "name": "norm kmer 1 file 1 thread",
+      "name": "1x large file, single thread",
       "type": "cppdbg",
       "request": "launch",
       "program": "${fileDirname}/${fileBasenameNoExtension}",
@@ -86,7 +49,7 @@
         "--reverse",
         "reverse.fastq",
         "--depth",
-        "2",
+        "4",
         "--verbose",
         "--debug",
         "1",
@@ -111,7 +74,7 @@
       "miDebuggerPath": "/usr/bin/gdb"
     },
     {
-      "name": "multi 1x large file, threaded",
+      "name": "1x large file, threaded",
       "type": "cppdbg",
       "request": "launch",
       "program": "${fileDirname}/${fileBasenameNoExtension}",
@@ -146,7 +109,7 @@
       "miDebuggerPath": "/usr/bin/gdb"
     },
     {
-      "name": "multi 2x large files, threaded",
+      "name": "2x large files, threaded",
       "type": "cppdbg",
       "request": "launch",
       "program": "${fileDirname}/${fileBasenameNoExtension}",
@@ -166,6 +129,82 @@
         "2",
         "-m",
         "2"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "gcc build active file",
+      "miDebuggerPath": "/usr/bin/gdb"
+    },
+    {
+      "name": "1x large file, threaded, fasta output",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${fileDirname}/${fileBasenameNoExtension}",
+      "args": [
+        "--forward",
+        "forward.fastq",
+        "--reverse",
+        "reverse.fastq",
+        "--depth",
+        "4",
+        "--verbose",
+        "--debug",
+        "1",
+        "-p",
+        "2",
+        "-m",
+        "2",
+        "--outformat",
+        "fa"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "gcc build active file",
+      "miDebuggerPath": "/usr/bin/gdb"
+    },
+    {
+      "name": "1x large file, threaded, fasta input and output",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${fileDirname}/${fileBasenameNoExtension}",
+      "args": [
+        "--forward",
+        "forward.fasta",
+        "--reverse",
+        "reverse.fasta",
+        "--depth",
+        "4",
+        "--verbose",
+        "--debug",
+        "1",
+        "-p",
+        "2",
+        "-m",
+        "2",
+        "--filetype",
+        "fa",
+        "--outformat",
+        "fa"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",

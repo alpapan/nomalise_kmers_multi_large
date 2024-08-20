@@ -35,7 +35,7 @@ struct config_t
     int depth;
     float coverage;
     int verbose;
-    char *filetype;
+    char *informat;
 };
 
 static const uint8_t base_map[256] = {
@@ -167,7 +167,7 @@ int parse_arguments(int argc, char *argv[], struct config_t *cfg)
     cfg->coverage = 0.9;
     cfg->verbose = 0;
     cfg->file_count = 0;
-    cfg->filetype = "fq";
+    cfg->informat = "fq";
 
     static struct option long_options[] = {
         {"forward", required_argument, 0, 'f'},
@@ -213,7 +213,7 @@ int parse_arguments(int argc, char *argv[], struct config_t *cfg)
             cfg->verbose = 1;
             break;
         case 't':
-            cfg->filetype = optarg;
+            cfg->informat = optarg;
             break;
         default:
             return 0;
@@ -236,7 +236,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    int lines_to_read = strcmp(cfg.filetype, "fa") == 0 ? 2 : 4;
+    int lines_to_read = strcmp(cfg.informat, "fa") == 0 ? 2 : 4;
     char *output_forward_filename = create_output_filename("output_forward", cfg.ksize, cfg.depth);
     char *output_reverse_filename = create_output_filename("output_reverse", cfg.ksize, cfg.depth);
     FILE *output_forward = fopen(output_forward_filename, "w");
@@ -251,7 +251,7 @@ int main(int argc, char *argv[])
     init_hash_table(&hash_table);
     int processed_count = 0, printed_count = 0, skipped_count = 0, prev_printed_count = 0, prev_skipped_count = 0;
     size_t total_kmers = 0;
-    char forward_record[4][MAX_SEQ_LENGTH], reverse_record[4][MAX_SEQ_LENGTH];
+    char forward_record[4][MAX_LINE_LENGTH], reverse_record[4][MAX_LINE_LENGTH];
     time_t start_time = time(NULL), last_report_time = start_time;
     int last_report_count = 0;
 
@@ -270,11 +270,11 @@ int main(int argc, char *argv[])
             int forward_read = 0, reverse_read = 0;
             for (int i = 0; i < lines_to_read; i++)
             {
-                if (fgets(forward_record[i], MAX_SEQ_LENGTH, forward_file) != NULL)
+                if (fgets(forward_record[i], MAX_LINE_LENGTH, forward_file) != NULL)
                 {
                     forward_read++;
                 }
-                if (fgets(reverse_record[i], MAX_SEQ_LENGTH, reverse_file) != NULL)
+                if (fgets(reverse_record[i], MAX_LINE_LENGTH, reverse_file) != NULL)
                 {
                     reverse_read++;
                 }
