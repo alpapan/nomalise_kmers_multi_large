@@ -1504,9 +1504,9 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
         }
 
         if (!cfg.debug)
-            sleep(60);
+            sleep(1);
         if (cfg.debug)
-            sleep(2);
+            sleep(0.1);
     }
 
     // final report
