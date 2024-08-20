@@ -1175,6 +1175,8 @@ void *process_thread_chunk(void *arg)
     double prev_rate = 0;
     size_t sequences_processed = 0;
     time_t current_time = time(NULL);
+    data->last_report_time = current_time;
+    data->last_report_count = data->processed_count;
 
     if (cfg.verbose)
         printf("Thread %d started; processing %d lines per record\n", thread_id, lines_to_read);
@@ -1427,14 +1429,6 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
         }
     }
 
-    // reporting
-    size_t processed_count;
-    size_t printed_count;
-    size_t skipped_count;
-    time_t last_report_time;
-    int last_report_count;
-    int thread_sync_interval;
-
     for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
     {
 
@@ -1457,27 +1451,6 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
             fprintf(stderr, "Error opening file to write: %s\n", thread_data[thread_number].thread_output_reverse_filename);
             exit(EXIT_FAILURE);
         }
-
-        thread_data[thread_number].thread_sync_interval = SYNC_INTERVAL;
-        thread_data[thread_number].thread_id = thread_number;
-        thread_data[thread_number].processed_count = 0;
-        thread_data[thread_number].printed_count = 0;
-        thread_data[thread_number].skipped_count = 0;
-        thread_data[thread_number].total_kmers = 0;
-        thread_data[thread_number].last_report_time = time(NULL);
-        thread_data[thread_number].last_report_count = 0;
-
-        // if i wanted to split hash tables
-        // for (int i=0;i<NUM_PARTITIONS;i++){ init_hash_table(&global_hash_tables[i]); }
-        // etc
-
-        thread_data[thread_number].hash_table = malloc(sizeof(hash_table_t));
-        if (!thread_data[thread_number].hash_table)
-        {
-            fprintf(stderr, "Thread %d: Memory allocation failed for hash table\n", thread_number);
-            exit(EXIT_FAILURE);
-        }
-        init_hash_table(thread_data[thread_number].hash_table);
 
         // store memory mapped file starts and stops, and data structure.
         thread_data[thread_number].forward_file_start = forward_thread_starts[thread_number];
@@ -1597,6 +1570,31 @@ int main(int argc, char *argv[])
         {
             fprintf(stderr, "Error memory mapping input files\n");
             goto cleanup;
+        }
+
+        // need a for loop for any data that will stay between runs
+        for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
+        {
+            thread_data[thread_number].thread_sync_interval = SYNC_INTERVAL;
+            thread_data[thread_number].thread_id = thread_number;
+            thread_data[thread_number].processed_count = 0;
+            thread_data[thread_number].printed_count = 0;
+            thread_data[thread_number].skipped_count = 0;
+            thread_data[thread_number].total_kmers = 0;
+            thread_data[thread_number].last_report_time = time(NULL);
+            thread_data[thread_number].last_report_count = 0;
+
+            // if i wanted to split hash tables
+            // for (int i=0;i<NUM_PARTITIONS;i++){ init_hash_table(&global_hash_tables[i]); }
+            // etc
+
+            thread_data[thread_number].hash_table = malloc(sizeof(hash_table_t));
+            if (!thread_data[thread_number].hash_table)
+            {
+                fprintf(stderr, "Thread %d: Memory allocation failed for hash table\n", thread_number);
+                exit(EXIT_FAILURE);
+            }
+            init_hash_table(thread_data[thread_number].hash_table);
         }
 
         // passing local copy as was having issues with pointers.
