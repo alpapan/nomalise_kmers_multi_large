@@ -47,8 +47,6 @@
 #define MAX_OUTPUT_LENGTH 8192
 #define CHUNK_SIZE 1000000
 #define MAX_THREADS 256
-// #define SYNC_INTERVAL 100000 // how many seqs/often to sync the kmer tables of each thread, this inits the thread-specific sync interval which increases with more data.
-#define SYNC_INTERVAL 1000000
 #define TABLE_LOAD_FACTOR 0.8
 #define MAX_K 32
 #define REPORTING_INTERVAL 60 // seconds
@@ -94,7 +92,6 @@ typedef struct
     FILE *thread_output_reverse;
     char *thread_output_forward_filename;
     char *thread_output_reverse_filename;
-    int thread_sync_interval;
     char *forward_data;
     char *reverse_data;
     size_t forward_file_start;
@@ -1556,6 +1553,16 @@ int main(int argc, char *argv[])
     }
 
     thread_data_t thread_data[cfg.cpus];
+    for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
+    {
+        thread_data[thread_number].thread_id = thread_number;
+        thread_data[thread_number].processed_count = 0;
+        thread_data[thread_number].printed_count = 0;
+        thread_data[thread_number].skipped_count = 0;
+        thread_data[thread_number].total_kmers = 0;
+        thread_data[thread_number].last_report_time = time(NULL);
+        thread_data[thread_number].last_report_count = 0;
+    }
 
     // start processing files
     time_t start_time = time(NULL);
@@ -1575,15 +1582,6 @@ int main(int argc, char *argv[])
         // need a for loop for any data that will stay between runs
         for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
         {
-            thread_data[thread_number].thread_sync_interval = SYNC_INTERVAL;
-            thread_data[thread_number].thread_id = thread_number;
-            thread_data[thread_number].processed_count = 0;
-            thread_data[thread_number].printed_count = 0;
-            thread_data[thread_number].skipped_count = 0;
-            thread_data[thread_number].total_kmers = 0;
-            thread_data[thread_number].last_report_time = time(NULL);
-            thread_data[thread_number].last_report_count = 0;
-
             // if i wanted to split hash tables
             // for (int i=0;i<NUM_PARTITIONS;i++){ init_hash_table(&global_hash_tables[i]); }
             // etc
@@ -1610,23 +1608,23 @@ int main(int argc, char *argv[])
         munmap_file(&reverse_mmap);
     }
 
-    // closeup and free data used across all files.
-    for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
-    {
-        fclose(thread_data[thread_number].thread_output_forward);
-        fclose(thread_data[thread_number].thread_output_reverse);
-        free(thread_data[thread_number].thread_output_forward_filename);
-        free(thread_data[thread_number].thread_output_reverse_filename);
-        free(thread_data[thread_number].hash_table->entries);
-        free(thread_data[thread_number].hash_table);
-    }
+        // closeup and free data used across all files.
+        for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
+        {
+            fclose(thread_data[thread_number].thread_output_forward);
+            fclose(thread_data[thread_number].thread_output_reverse);
+            free(thread_data[thread_number].thread_output_forward_filename);
+            free(thread_data[thread_number].thread_output_reverse_filename);
+            free(thread_data[thread_number].hash_table->entries);
+            free(thread_data[thread_number].hash_table);
+        }
 
-    printf("\n--- Final Report ---\n");
-    printf("Processed Records: %'zu\n", reporting.total_processed);
-    printf("Printed Records: %'zu\n", reporting.total_printed);
-    printf("Skipped Records: %'zu\n", reporting.total_skipped);
-    // we can't get this if we have multiple threads unless we merge the tables, is it worth it?
-    //    printf("Total unique kmers across all sequences: %'zu\n", reporting.total_kmers);
+        printf("\n--- Final Report ---\n");
+        printf("Processed Records: %'zu\n", reporting.total_processed);
+        printf("Printed Records: %'zu\n", reporting.total_printed);
+        printf("Skipped Records: %'zu\n", reporting.total_skipped);
+        // we can't get this if we have multiple threads unless we merge the tables, is it worth it?
+        //    printf("Total unique kmers across all sequences: %'zu\n", reporting.total_kmers);
 
 cleanup:
     for (int thread_number = 0; thread_number < cfg.forward_file_count; thread_number++)
