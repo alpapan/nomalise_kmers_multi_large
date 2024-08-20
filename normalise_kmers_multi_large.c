@@ -530,7 +530,7 @@ int parse_arguments(int argc, char *argv[])
 
     if (cfg.forward_file_count != cfg.reverse_file_count)
     {
-        fprintf(stderr, "Error: Number of forward and reverse files must match\n");
+        fprintf(stderr, "Error: Number of forward (%d) and reverse files (%d) must match\n", cfg.forward_file_count, cfg.reverse_file_count);
         return 0;
     }
     if (cfg.cpus <= 0)
@@ -1553,6 +1553,8 @@ int main(int argc, char *argv[])
     }
 
     thread_data_t thread_data[cfg.cpus];
+
+    // need a for loop for any data that will stay between runs
     for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
     {
         thread_data[thread_number].thread_id = thread_number;
@@ -1562,6 +1564,18 @@ int main(int argc, char *argv[])
         thread_data[thread_number].total_kmers = 0;
         thread_data[thread_number].last_report_time = time(NULL);
         thread_data[thread_number].last_report_count = 0;
+
+        // if i wanted to split hash tables
+        // for (int i=0;i<NUM_PARTITIONS;i++){ init_hash_table(&global_hash_tables[i]); }
+        // etc
+
+        thread_data[thread_number].hash_table = malloc(sizeof(hash_table_t));
+        if (!thread_data[thread_number].hash_table)
+        {
+            fprintf(stderr, "Thread %d: Memory allocation failed for hash table\n", thread_number);
+            exit(EXIT_FAILURE);
+        }
+        init_hash_table(thread_data[thread_number].hash_table);
     }
 
     // start processing files
@@ -1579,22 +1593,6 @@ int main(int argc, char *argv[])
             goto cleanup;
         }
 
-        // need a for loop for any data that will stay between runs
-        for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
-        {
-            // if i wanted to split hash tables
-            // for (int i=0;i<NUM_PARTITIONS;i++){ init_hash_table(&global_hash_tables[i]); }
-            // etc
-
-            thread_data[thread_number].hash_table = malloc(sizeof(hash_table_t));
-            if (!thread_data[thread_number].hash_table)
-            {
-                fprintf(stderr, "Thread %d: Memory allocation failed for hash table\n", thread_number);
-                exit(EXIT_FAILURE);
-            }
-            init_hash_table(thread_data[thread_number].hash_table);
-        }
-
         // passing local copy as was having issues with pointers.
         if (multithreaded_process_files(thread_data, &forward_mmap, &reverse_mmap) != 0)
         {
@@ -1608,23 +1606,23 @@ int main(int argc, char *argv[])
         munmap_file(&reverse_mmap);
     }
 
-        // closeup and free data used across all files.
-        for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
-        {
-            fclose(thread_data[thread_number].thread_output_forward);
-            fclose(thread_data[thread_number].thread_output_reverse);
-            free(thread_data[thread_number].thread_output_forward_filename);
-            free(thread_data[thread_number].thread_output_reverse_filename);
-            free(thread_data[thread_number].hash_table->entries);
-            free(thread_data[thread_number].hash_table);
-        }
+    // closeup and free data used across all files.
+    for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
+    {
+        fclose(thread_data[thread_number].thread_output_forward);
+        fclose(thread_data[thread_number].thread_output_reverse);
+        free(thread_data[thread_number].thread_output_forward_filename);
+        free(thread_data[thread_number].thread_output_reverse_filename);
+        free(thread_data[thread_number].hash_table->entries);
+        free(thread_data[thread_number].hash_table);
+    }
 
-        printf("\n--- Final Report ---\n");
-        printf("Processed Records: %'zu\n", reporting.total_processed);
-        printf("Printed Records: %'zu\n", reporting.total_printed);
-        printf("Skipped Records: %'zu\n", reporting.total_skipped);
-        // we can't get this if we have multiple threads unless we merge the tables, is it worth it?
-        //    printf("Total unique kmers across all sequences: %'zu\n", reporting.total_kmers);
+    printf("\n--- Final Report ---\n");
+    printf("Processed Records: %'zu\n", reporting.total_processed);
+    printf("Printed Records: %'zu\n", reporting.total_printed);
+    printf("Skipped Records: %'zu\n", reporting.total_skipped);
+    // we can't get this if we have multiple threads unless we merge the tables, is it worth it?
+    //    printf("Total unique kmers across all sequences: %'zu\n", reporting.total_kmers);
 
 cleanup:
     for (int thread_number = 0; thread_number < cfg.forward_file_count; thread_number++)
