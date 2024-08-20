@@ -178,7 +178,7 @@ void reverse_complement(const char *seq, char *rev_comp, int k);
 const char *get_canonical_kmer(const char *kmer, int k);
 
 ////
-size_t find_thread_start(char *data, size_t start_pos, size_t end_pos);
+size_t find_thread_exact_end(char *data, size_t start_pos, size_t end_pos);
 void calculate_thread_positions(char *data, size_t total_file_size, int thread_count, size_t **thread_starts, size_t **thread_ends);
 void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id);
 void *process_thread_chunk(void *arg);
@@ -899,68 +899,156 @@ const char *get_canonical_kmer(const char *kmer, int k)
 ////////////////////////////////////////////////////////////////
 ///////////////// DATA PROCESSING //////////////////////////////
 ////////////////////////////////////////////////////////////////
-size_t find_thread_start(char *data, size_t start_pos, size_t end_pos)
+size_t find_thread_exact_end(char *data, size_t start_pos, size_t end_pos)
 {
-    int line_break_count = 0;
 
-    // loop backwards
-    for (size_t i = end_pos; i > start_pos; i--)
+    // fasta
+    if (cfg.is_input_fastq == false)
     {
-        if (data[i] == '\n')
+        for (size_t i = end_pos; i > start_pos; i--) // loop backwards
+            if (data[i] == '>')
+                return i - 1;
+    }
+    else
+    {
+        // fastq
+        int line_break_count = 0;
+        bool header_qual_found = false;
+        for (size_t i = end_pos; i > start_pos; i--) // loop backwards
         {
-            line_break_count++;
-            if (cfg.is_input_fastq == true)
+            // printf("1:checking start position at %zu, line_break_count %d, line is %c\n", i, line_break_count, data[i]);
+            if (data[i] == '\n') // when we have a new line, check the next character.
             {
-                // if we've encountered three newlines, qual header + and seq @ header found
-                if (line_break_count == 3 && data[i + 1] == '+' && data[i - 2] == '@')
+                line_break_count++;
+                if (data[i + 1] == '+')
+                    header_qual_found = true;
+                else if (header_qual_found && data[i + 1] == '@')
+                    return i;
+                if (line_break_count == 7)
                 {
-                    return i - 2; // return @ position, ie. start of next thread
-                }
-            }
-            else // fasta, reading 2 lines at a time, > at start of first line
-            {
-                if (line_break_count == 1 && data[0] == '>')
-                {
-                    return i - 1; // return pos of >, start of the next thread
+                    printf("ERROR: after 7 lines, I couldn't find the + and @ headers near this chunk %zu\n", i);
+                    exit(EXIT_FAILURE);
                 }
             }
         }
     }
-    // chatgpt told me that if no valid start is found, default to start_pos
-    return start_pos;
+
+    printf("ERROR: i couldn't find the start of sequence before this chunk end %zu\n", end_pos);
+    exit(EXIT_FAILURE);
+    return -1;
 }
+
+// this has a bug, we don't account for forward and reverse files having different sizes.
+// we should just do line counting...??!?!?
 void calculate_thread_positions(char *data, size_t total_file_size, int thread_count, size_t **thread_starts, size_t **thread_ends)
 {
     size_t approx_chunk_size = total_file_size / thread_count;
     size_t approximate_end = approx_chunk_size - (MAX_LINE_LENGTH * 4);
 
-    *thread_starts = malloc(thread_count * sizeof(size_t));
-    *thread_ends = malloc(thread_count * sizeof(size_t));
-    // we reuse the arrays
+    //    printf("file size is %'zu thread count is %d\n", total_file_size, thread_count);
 
-    if (*thread_starts == NULL || *thread_ends == NULL)
+    (*thread_starts)[0] = 0;
+    (*thread_ends)[0] = find_thread_exact_end(data, 0, approximate_end);
+    (*thread_ends)[thread_count - 1] = total_file_size - 1; // last thread, end of file
+
+    for (int thread_number = 1; thread_number < thread_count; thread_number++)
     {
-        perror("Error allocating memory for thread positions");
-        exit(EXIT_FAILURE);
-    }
-
-    (*thread_starts)[0] = 0; // first thread starts at beginning.
-
-    for (int i = 1; i < thread_count; i++)
-    {
-        // reset as we're reusing
-        (*thread_starts)[i] = 0;
-
-        size_t start_pos = (*thread_starts)[i - 1];
+        size_t start_pos = (*thread_ends)[thread_number - 1] + 1; // start is end of previous one
         size_t end_pos = start_pos + approximate_end;
-        (*thread_starts)[i] = find_thread_start(data, start_pos, end_pos);
-        // gpt says End of current thread is just before the start of the next
-        (*thread_ends)[i - 1] = (*thread_starts)[i] - 1;
-    }
+        // printf("thread %d search space: start_pos %'zu end_pos %'zu\n", i, start_pos, end_pos);
 
-    // last thread ends at the end of the file
-    (*thread_ends)[thread_count - 1] = total_file_size - 1;
+        (*thread_ends)[thread_number] = find_thread_exact_end(data, start_pos, end_pos);
+        // printf("thread %d start set to %'zu end to %'zu\n", i, (*thread_starts)[i],(*thread_ends)[i]);
+        if (thread_number < thread_count - 1)
+            (*thread_starts)[thread_number + 1] = (*thread_ends)[thread_number] + 1;
+    }
 }
+
+void calculate_thread_positions_from_records(char *data, size_t total_file_size, int thread_count, size_t **thread_starts, size_t **thread_ends, size_t records)
+{
+    size_t records_per_thread = records / thread_count; // last thread will have a bit more
+
+    if (thread_count < 2 || records_per_thread < 1 || total_file_size < 1)
+        return;
+
+    size_t max_lines = cfg.is_input_fastq == true ? records_per_thread * 4 : records_per_thread * 2;
+
+    // thread 0 is 0
+    (*thread_starts)[0] = 0;
+    (*thread_ends)[thread_count - 1] = total_file_size - 1; // last thread, end of file
+
+    // don't need last thread
+    for (int thread_number = 0; thread_number < thread_count - 1; thread_number++)
+    {
+        size_t line_count = 0;
+        for (size_t i = (*thread_starts)[thread_number]; i < total_file_size; i++)
+        {
+            if (data[i] == '\n')
+            {
+                line_count++;
+                if (line_count == max_lines)
+                {
+                    (*thread_ends)[thread_number] = i;
+
+                    if (thread_number < thread_count - 1)
+                        (*thread_starts)[thread_number + 1] = i + 1;
+
+                    break;
+                }
+            }
+        }
+    }
+}
+
+size_t count_records_seqfile(char *data, size_t size)
+{
+    size_t line_count = 0;
+    for (size_t i = 0; i < size; ++i)
+    {
+        if (data[i] == '\n')
+        {
+            line_count++;
+        }
+    }
+    // Add 1 for the last line if it doesn't end with a newline
+    if (size > 0 && data[size - 1] != '\n')
+        line_count++;
+
+    if (cfg.is_input_fastq == true)
+        return line_count / 4;
+    else
+        return line_count / 2;
+}
+
+// size_t get_position_from_sequence_record(char *data, size_t size, size_t record_number)
+// {
+//     size_t line_number = 0;
+
+//     if (cfg.is_input_fastq == true)
+//         line_number = record_number * 4;
+//     else
+//         line_number = record_number * 2;
+
+//     size_t current_line = 1;
+//     size_t current_position = 0;
+
+//     for (size_t i = 0; i < size; ++i)
+//     {
+//         if (data[i] == '\n')
+//         {
+//             current_line++;
+//             current_position = i;
+//             if (current_line == line_number)
+//             {
+//                 printf("Line %'zu found at position %zu, data: %c", line_number, current_position, data[i]);
+//                 return current_position + 1;
+//             }
+//         }
+//     }
+//     printf("ERROR: Line number %zu not found in file\n", line_number);
+//     exit(EXIT_FAILURE);
+//     return (size_t)-1;
+// }
 
 void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id)
 {
@@ -1230,10 +1318,57 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
     // let's get start and ends for the mmapped file.
     size_t *forward_thread_starts = NULL;
     size_t *forward_thread_ends = NULL;
-    calculate_thread_positions(forward_mmap->data, forward_mmap->size, cfg.cpus, &forward_thread_starts, &forward_thread_ends);
     size_t *reverse_thread_starts = NULL;
     size_t *reverse_thread_ends = NULL;
-    calculate_thread_positions(reverse_mmap->data, reverse_mmap->size, cfg.cpus, &reverse_thread_starts, &reverse_thread_ends);
+    forward_thread_starts = calloc(cfg.cpus, sizeof(size_t));
+    forward_thread_ends = calloc(cfg.cpus, sizeof(size_t));
+    reverse_thread_starts = calloc(cfg.cpus, sizeof(size_t));
+    reverse_thread_ends = calloc(cfg.cpus, sizeof(size_t));
+
+    if (!forward_thread_starts || !forward_thread_ends || !reverse_thread_starts || !reverse_thread_ends)
+    {
+        perror("Error allocating memory for thread positions");
+        exit(EXIT_FAILURE);
+    }
+
+    // todo: bug, nb this will not work because forward and reverse can have different file sizes.
+    if (cfg.cpus == 1)
+    {
+        forward_thread_ends[0] = forward_mmap->size - 1;
+        reverse_thread_ends[0] = reverse_mmap->size - 1;
+    }
+    else
+    {
+
+        if (forward_mmap->size == reverse_mmap->size)
+        {
+            calculate_thread_positions(forward_mmap->data, forward_mmap->size, cfg.cpus, &forward_thread_starts, &forward_thread_ends);
+            calculate_thread_positions(reverse_mmap->data, reverse_mmap->size, cfg.cpus, &reverse_thread_starts, &reverse_thread_ends);
+        }
+        else
+        {
+            if (cfg.verbose)
+                printf("The forward and reverse files have different file size, so calculating split amongst threads is slower, hold on...\n");
+
+            size_t total_records = 0;
+            total_records = count_records_seqfile(forward_mmap->data, forward_mmap->size);
+
+            if (cfg.debug > 0)
+                printf("forward file has %'zu records\n", total_records);
+
+            calculate_thread_positions_from_records(forward_mmap->data, forward_mmap->size, cfg.cpus, &forward_thread_starts, &forward_thread_ends, total_records);
+            calculate_thread_positions_from_records(reverse_mmap->data, reverse_mmap->size, cfg.cpus, &reverse_thread_starts, &reverse_thread_ends, total_records);
+
+            for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
+            {
+                if (cfg.debug > 2)
+                {
+                    printf("fwd record starts at %'zu (%c) and ends at %'zu (newline after %c)\n", forward_thread_starts[thread_number], forward_mmap->data[forward_thread_starts[thread_number]], forward_thread_ends[thread_number], forward_mmap->data[forward_thread_ends[thread_number] - 1]);
+                    printf("rev record starts at %'zu (%c) and ends at %'zu (newline after %c)\n", reverse_thread_starts[thread_number], reverse_mmap->data[reverse_thread_starts[thread_number]], reverse_thread_ends[thread_number], reverse_mmap->data[reverse_thread_ends[thread_number] - 1]);
+                }
+            }
+        }
+    }
 
     // reporting
     size_t processed_count;
