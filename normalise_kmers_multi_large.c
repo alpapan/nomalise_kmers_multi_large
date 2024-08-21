@@ -1,4 +1,5 @@
 #define VERSION 20240821
+// NB: written with some AI assistance
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,11 +53,11 @@
 #define MAX_K 32
 #define REPORTING_INTERVAL 60 // seconds
 
-// lookup table, including lower case (Just In Case(TM))
+    // lookup table, including lower case (Just In Case(TM))
 
-static const uint8_t base_map[256] = {
-    ['A'] = 0x00, ['C'] = 0x01, ['G'] = 0x02, ['T'] = 0x03
-    // , ['a'] = 0x00, ['c'] = 0x01, ['g'] = 0x02, ['t'] = 0x03 // assume uppercase
+    static const uint8_t base_map[256] = {
+        ['A'] = 0x00, ['C'] = 0x01, ['G'] = 0x02, ['T'] = 0x03
+        // , ['a'] = 0x00, ['c'] = 0x01, ['g'] = 0x02, ['t'] = 0x03 // assume uppercase
 };
 static const char rev_base_map[4] = {'A', 'C', 'G', 'T'};
 
