@@ -119,6 +119,7 @@ struct config_t
     int reverse_file_count;
     int ksize;
     int depth;
+    int depth_per_cpu;
     float coverage;
     int verbose;
     char *informat;
@@ -413,6 +414,7 @@ int parse_arguments(int argc, char *argv[])
     cfg.reverse_files = NULL;
     cfg.ksize = 25;
     cfg.depth = 100;
+    cfg.depth_per_cpu = cfg.depth / cfg.cpus;
     cfg.memory = 0; // default from INITIAL_CAPACITY - set to be a prime just above 1Gb memory.
     cfg.canonical = 0;
     cfg.version = 0;
@@ -497,8 +499,7 @@ int parse_arguments(int argc, char *argv[])
                 cfg.informat = "fq";
                 cfg.is_input_fastq = true;
             }
-
-            if (strcmp(cfg.informat, "fq") != 0 && strcmp(cfg.informat, "fa") != 0)
+            else
             {
                 printf("Input file format must be either fa or fq, not %s\n", cfg.informat);
                 return 0;
@@ -517,8 +518,7 @@ int parse_arguments(int argc, char *argv[])
                 cfg.outformat = "fq";
                 cfg.is_output_fastq = true;
             }
-
-            if (strcmp(cfg.outformat, "fq") != 0 && strcmp(cfg.outformat, "fa") != 0)
+            else
             {
                 printf("Output file format must be either fa or fq, not %s\n", cfg.outformat);
                 return 0;
@@ -530,6 +530,16 @@ int parse_arguments(int argc, char *argv[])
         }
     }
 
+    // processing after all options parsed:
+    cfg.depth_per_cpu = cfg.depth / cfg.cpus;
+    // since we're processing each thread chunk separately.
+    cfg.initial_hash_size = (cfg.memory > 0) ? memoryGB2capacity(cfg.memory) : INITIAL_CAPACITY;
+    float memory_per_cpu = capacity2memory(cfg.initial_hash_size);
+    printf("Initial hash table size set to %'zu (memory ~ %'0.2f Gb for each of %d threads, ~ %'d Gb total))\n", cfg.initial_hash_size, memory_per_cpu, cfg.cpus, cfg.memory);
+
+    /////////////////////////////////////////////////////////////////////////
+    //////////////      checks       ////////////////////////////////////////
+    /////////////////////////////////////////////////////////////////////////
     if (cfg.verbose)
     {
         printf("VERSION: %d, CMD: ", VERSION);
@@ -553,7 +563,11 @@ int parse_arguments(int argc, char *argv[])
         }
         printf("\n");
     }
-
+    if (cfg.forward_file_count == 0 || cfg.reverse_file_count == 0)
+    {
+        fprintf(stderr, "Error: no fwd (%d) or reverse (%d) files provided\n", cfg.forward_file_count, cfg.reverse_file_count);
+        return 0;
+    }
     if (strcmp(cfg.informat, "fa") == 0 && strcmp(cfg.outformat, "fq") == 0)
     {
         fprintf(stderr, "Error: cannot request an output format of FASTQ when input is FASTA\n");
@@ -564,46 +578,35 @@ int parse_arguments(int argc, char *argv[])
         fprintf(stderr, "Error: Number of forward (%d) and reverse files (%d) must match\n", cfg.forward_file_count, cfg.reverse_file_count);
         return 0;
     }
-    if (cfg.cpus <= 0)
+    if (cfg.cpus <= 0 || cfg.cpus > MAX_THREADS)
     {
-        fprintf(stderr, "Error: CPU count must be a positive integer\n");
+        fprintf(stderr, "Error: CPU count (%d) must be a positive integer and up to %d\n", cfg.cpus, MAX_THREADS);
         return 0;
     }
     if (cfg.ksize < 5 || cfg.ksize > 32)
     {
-        fprintf(stderr, "Error: Only kmer sizes of 5 to 32 are supported\n");
+        fprintf(stderr, "Error: Only kmer sizes (%d) of 5 to 32 are supported\n", cfg.ksize);
         return 0;
     }
-    if (cfg.coverage > 1)
+    if (cfg.coverage > 1 || cfg.coverage < 0.001)
     {
-        fprintf(stderr, "Error: Coverage is the proportion of the sequence covered by high kmers and must be between 0 and 1\n");
+        fprintf(stderr, "Error: Coverage (%3.f) is the proportion of the sequence covered by high kmers and must be between 0 and 1\n", cfg.coverage);
         return 0;
     }
-    if (cfg.depth <= 1)
+    if (cfg.depth < 2)
     {
-        fprintf(stderr, "Error: Depth is the number of times a kmer needs to be found before being flagged as high coverage, it must be above 1\n");
+        fprintf(stderr, "Error: Depth (%d) is the number of times a kmer needs to be found before being flagged as high coverage, it must be above 1\n", cfg.depth);
         return 0;
     }
-    if (cfg.depth < cfg.cpus * 2)
+    if (cfg.depth_per_cpu < 2)
     {
-        fprintf(stderr, "Error: Depth must be at least 2 x number of CPUs (for performance reasons; but this version of the program is written to normalise to 50+\n");
+        fprintf(stderr, "Error: Depth (%d) must be at least 2 x number of CPUs (for performance reasons; but this version of the program is written to normalise to 50+\n", cfg.depth);
         return 0;
     }
-    if (cfg.forward_file_count == 0 || cfg.reverse_file_count == 0 || cfg.ksize <= 0 || cfg.depth <= 0 || cfg.coverage <= 0 || cfg.coverage > 1)
-    {
-        printf("ERROR: Wrong options somewhere: fw files: %d rev files: %d ksize: %d depth cutoff: %d coverage cutoff: %.2f\n", cfg.forward_file_count, cfg.reverse_file_count, cfg.ksize, cfg.depth, cfg.coverage);
-        return 0;
-    }
-
-    // since we're processing each thread chunk separately.
-    cfg.depth = cfg.depth / cfg.cpus;
-    cfg.initial_hash_size = (cfg.memory > 0) ? memoryGB2capacity(cfg.memory) : INITIAL_CAPACITY;
-    float memory_per_cpu = capacity2memory(cfg.initial_hash_size);
-    printf("Initial hash table size set to %'zu (memory ~ %'0.2f Gb for each of %d threads, ~ %'d Gb total))\n", cfg.initial_hash_size, memory_per_cpu, cfg.cpus, cfg.memory);
 
     if (cfg.initial_hash_size < 100000)
     {
-        fprintf(stderr, "Error: initial kmer table size is too small, it should be set to at least 100000 (or leave empty for default)\n");
+        fprintf(stderr, "Error: initial kmer table size is too small (%'zu), it should be set to at least 100000 (or leave empty for default)\n", cfg.initial_hash_size);
         return 0;
     }
 
@@ -1272,7 +1275,7 @@ void *process_thread_chunk(void *arg)
     FILE *output_reverse = data->thread_output_reverse;
     // so we don't keep accessing it.
     int K = cfg.ksize;
-    int depth_per_cpu = cfg.depth;
+    int depth_per_cpu = cfg.depth_per_cpu;
     int debug = cfg.debug;
     bool is_input_fastq = cfg.is_input_fastq;
     bool is_output_fastq = cfg.is_output_fastq;
@@ -1353,7 +1356,7 @@ void *process_thread_chunk(void *arg)
         // this function already checks if seq is less than k but it doesn't check if both sequences are.
         // todo: change sequence to make only a single call, fwd and reverse, return boolean to use for skipping.
         bool process_success = process_sequence_pair(forward_record[1], reverse_record[1], local_hash_table, &seq_high_count_kmers_forward, &total_seq_kmers_forward, &seq_high_count_kmers_reverse, &total_seq_kmers_reverse, thread_id, K, depth_per_cpu);
-        // process_sequence(reverse_record[1], local_hash_table, cfg.ksize, cfg.depth, &seq_high_count_kmers_reverse, &total_seq_kmers_reverse, thread_id);
+        // process_sequence(reverse_record[1], local_hash_table, cfg.ksize, cfg.depth_per_cpu, &seq_high_count_kmers_reverse, &total_seq_kmers_reverse, thread_id);
         if (process_success == false)
             continue;
 
@@ -1603,11 +1606,6 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
             free(reverse_thread_ends);
             return 1;
         }
-
-        if (!cfg.debug)
-            sleep(1);
-        if (cfg.debug)
-            sleep(0.1);
     }
 
     // final report
@@ -1687,8 +1685,8 @@ int main(int argc, char *argv[])
         // every thread prints to its own file
         thread_data[thread_number].thread_output_forward_filename = NULL;
         thread_data[thread_number].thread_output_reverse_filename = NULL;
-        thread_data[thread_number].thread_output_forward_filename = create_output_filename("output_forward", cfg.ksize, cfg.depth, thread_number);
-        thread_data[thread_number].thread_output_reverse_filename = create_output_filename("output_reverse", cfg.ksize, cfg.depth, thread_number);
+        thread_data[thread_number].thread_output_forward_filename = create_output_filename("output_forward", cfg.ksize, cfg.depth_per_cpu, thread_number);
+        thread_data[thread_number].thread_output_reverse_filename = create_output_filename("output_reverse", cfg.ksize, cfg.depth_per_cpu, thread_number);
 
         thread_data[thread_number].thread_output_forward = fopen(thread_data[thread_number].thread_output_forward_filename, "w");
         if (!thread_data[thread_number].thread_output_forward)
