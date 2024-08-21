@@ -702,6 +702,13 @@ void fastq_to_fasta(char (*fastq_record)[4][MAX_LINE_LENGTH], char *fasta_output
 
 void init_hash_table(hash_table_t *ht)
 {
+    // this shouldn't happen but just in case we copy the for loop in the wrong place (again)
+    if (ht && ht->entries)
+    {
+        printf("hash table with entries found (shouldn't happen) attempting to free hash table\n");
+        free(ht->entries);
+    }
+
     ht->entries = calloc(cfg.initial_hash_size, sizeof(kmer_t));
     if (!ht->entries)
     {
@@ -1308,7 +1315,7 @@ void *process_thread_chunk(void *arg)
             float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
             float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
             float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
-            printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences per second, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total unique kmers across all sequences: %'zu (%+.2f%%)\n",
+            printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences/s, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total unique kmers across all sequences: %'zu (%+.2f%%)\n",
                    thread_id, rate, prev_rate_improvement * 100,
                    data->processed_count,
                    data->printed_count,
@@ -1339,7 +1346,7 @@ void *process_thread_chunk(void *arg)
     float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
     float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
     float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
-    printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences per second, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total unique kmers across all sequences: %'zu (%+.2f%%)\n",
+    printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences/s, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total unique kmers across all sequences: %'zu (%+.2f%%)\n",
            thread_id, rate, prev_rate_improvement * 100,
            data->processed_count,
            data->printed_count,
@@ -1428,26 +1435,6 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
 
     for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
     {
-
-        // initialise the output files for each thread (otherwise we'd need to open as append)
-        // every thread prints to its own file
-        thread_data[thread_number].thread_output_forward_filename = NULL;
-        thread_data[thread_number].thread_output_reverse_filename = NULL;
-        thread_data[thread_number].thread_output_forward_filename = create_output_filename("output_forward", cfg.ksize, cfg.depth, thread_number);
-        thread_data[thread_number].thread_output_reverse_filename = create_output_filename("output_reverse", cfg.ksize, cfg.depth, thread_number);
-
-        thread_data[thread_number].thread_output_forward = fopen(thread_data[thread_number].thread_output_forward_filename, "w");
-        if (!thread_data[thread_number].thread_output_forward)
-        {
-            fprintf(stderr, "Error opening file to write: %s\n", thread_data[thread_number].thread_output_forward_filename);
-            exit(EXIT_FAILURE);
-        }
-        thread_data[thread_number].thread_output_reverse = fopen(thread_data[thread_number].thread_output_reverse_filename, "w");
-        if (!thread_data[thread_number].thread_output_reverse)
-        {
-            fprintf(stderr, "Error opening file to write: %s\n", thread_data[thread_number].thread_output_reverse_filename);
-            exit(EXIT_FAILURE);
-        }
 
         // store memory mapped file starts and stops, and data structure.
         thread_data[thread_number].forward_file_start = forward_thread_starts[thread_number];
@@ -1570,12 +1557,34 @@ int main(int argc, char *argv[])
         // etc
 
         thread_data[thread_number].hash_table = malloc(sizeof(hash_table_t));
+        memset(thread_data[thread_number].hash_table, 0, sizeof(hash_table_t));
+
         if (!thread_data[thread_number].hash_table)
         {
             fprintf(stderr, "Thread %d: Memory allocation failed for hash table\n", thread_number);
             exit(EXIT_FAILURE);
         }
         init_hash_table(thread_data[thread_number].hash_table);
+
+        // initialise the output files for each thread (otherwise we'd need to open as append)
+        // every thread prints to its own file
+        thread_data[thread_number].thread_output_forward_filename = NULL;
+        thread_data[thread_number].thread_output_reverse_filename = NULL;
+        thread_data[thread_number].thread_output_forward_filename = create_output_filename("output_forward", cfg.ksize, cfg.depth, thread_number);
+        thread_data[thread_number].thread_output_reverse_filename = create_output_filename("output_reverse", cfg.ksize, cfg.depth, thread_number);
+
+        thread_data[thread_number].thread_output_forward = fopen(thread_data[thread_number].thread_output_forward_filename, "w");
+        if (!thread_data[thread_number].thread_output_forward)
+        {
+            fprintf(stderr, "Error opening file to write: %s\n", thread_data[thread_number].thread_output_forward_filename);
+            exit(EXIT_FAILURE);
+        }
+        thread_data[thread_number].thread_output_reverse = fopen(thread_data[thread_number].thread_output_reverse_filename, "w");
+        if (!thread_data[thread_number].thread_output_reverse)
+        {
+            fprintf(stderr, "Error opening file to write: %s\n", thread_data[thread_number].thread_output_reverse_filename);
+            exit(EXIT_FAILURE);
+        }
     }
 
     // start processing files
@@ -1639,7 +1648,7 @@ cleanup:
     if (reporting.total_processed > 0)
     {
         double processing_rate = reporting.total_processed / total_runtime;
-        printf("Overall processing rate: %'.0f sequences per second\n", processing_rate);
+        printf("Overall processing rate: %'.0f sequences/s\n", processing_rate);
     }
     else
     {
