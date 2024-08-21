@@ -14,10 +14,12 @@
 #include <getopt.h>
 #include <stdbool.h>
 
-// remove redumdant code
-// ensure records are read 2/4 lines at a time
-// support gz bz2 input will be hard because of record boundaries
-// support gz bz2 output will be easier
+// [ ] - AP 20240821 TODO: remove redundant code
+// [x] - i attempted to integrated a job queue system but then realised it wouldn't actually improve performance;
+//        file is still wholly read while converting records to bytes and sending them to the queue.
+//        it would only help if the file was not memory mapped as it wouldn't need to store data in memory. but with mmap there is no benefit?
+// [ ] - support gz bz2 input will be hard because of mmapped record boundaries, only solution would be to create a temp file?
+// [ ] - support streaming gz output will be easier but streaming bz2 not possible (unless compress at the end but then what's the point)?
 
 //////// HELPERS
 
@@ -37,11 +39,10 @@
 // reverse_thread_starts
 // reverse_thread_ends
 
-// TODO
-
-// #define INITIAL_CAPACITY 500000003 // 7.5gb per cpu equiv genome/transcriptome size; should be a prime number; remember we do not convert to canonical kmers (as this was create for rnaseq)
-#define INITIAL_CAPACITY 150000001 // 2.3gb good starting value for a transcriptome, esp if stranded
-// we moved away from specifying capacity in code, user specifies starting memory.
+// #define INITIAL_CAPACITY 150000001 // 2.3gb good starting value for a transcriptome, esp if stranded;
+//  500000003: 7.5gb per cpu equiv genome/transcriptome size; remember we do not convert to canonical kmers (as this was create for rnaseq)
+//  we moved away from specifying capacity in code, user specifies starting memory.
+#define INITIAL_CAPACITY 67108879 // prime for 1 gb
 
 #define MAX_LINE_LENGTH 1024
 #define MAX_OUTPUT_LENGTH 8192
@@ -159,6 +160,7 @@ typedef struct
 } ThreadPool;
 
 // Function prototypes
+int int_increment_even(int num);
 char *read_line(char *ptr, char *buffer, int max_length);
 float capacity2memory(size_t capacity);
 float memoryGB2capacity(size_t memory);
@@ -168,7 +170,7 @@ static void replacestr(const char *line, const char *search, const char *replace
 bool is_in_list(const char *target, const char *list[], size_t list_size);
 ////
 
-void print_usage(char *program_name);
+void print_usage();
 int parse_arguments(int argc, char *argv[]);
 void process_forward_files(char *first_file, char **additional_files);
 void process_reverse_files(char *first_file, char **additional_files);
@@ -205,6 +207,14 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
 ////////// HELPER FUNCTIONS ////////////////////////////////////
 ////////////////////////////////////////////////////////////////
 
+int int_increment_even(int num)
+{
+    if (num % 2 == 0)
+        return num + 1;
+
+    return num;
+}
+
 char *read_line(char *ptr, char *buffer, int max_length)
 {
     int i = 0;
@@ -231,8 +241,9 @@ float capacity2memory(size_t capacity)
 float memoryGB2capacity(size_t memory)
 {
     float number = (float)memory * 1073741824;
-    float per_cpu = number / 16;
-    return per_cpu / cfg.cpus;
+    float total_mem = number / 16;
+    float per_cpu = total_mem / cfg.cpus;
+    return int_increment_even(per_cpu); // not a prime but a bit better than having an even number
 }
 
 mmap_file_t mmap_file(const char *filename)
@@ -365,9 +376,9 @@ void thread_pool_add_job(ThreadPool *pool, void (*function)(void *), void *argum
 ///////////////// ARGUMENTS AND FILES //////////////////////////
 ////////////////////////////////////////////////////////////////
 
-void print_usage(char *program_name)
+void print_usage()
 {
-    fprintf(stderr, "Usage: %s"
+    fprintf(stderr, "Usage:"
                     "\n\n\t\tMandatory:"
                     "\n\t\t* --forward|-f file1 [file2+]\tList of forward (read1) sequence files"
                     "\n\t\t* --reverse|-r file1 [file2+]\tList of reverse (read2) sequence files"
@@ -379,13 +390,12 @@ void print_usage(char *program_name)
                     "\n\t\t[--canonical|-c]\t\t\tFlag to ask the program to merge kmers from forward and reverse complement forms (e.g. for DNA-Seq or unstranded RNA-Seq)"
                     "\n\t\t[--filetype|-t (fq|fa; def. fq)]\tWhether the input files are fastq or fasta"
                     "\n\t\t[--outformat|-o (fq|fq; def. fq)]\tWhether you want the output files as fastq or fasta (e.g. for Trinity)"
-                    "\n\t\t[--memory_start|-m (integer; def. 10)]\tNumber in Gb of the total memory the program will initially allocate across all threads. The program may request more memory when needed but very small values will cause it to slow down"
+                    "\n\t\t[--memory_start|-m (integer; def. 1)]\tNumber in Gb of the total memory the program will initially allocate across all threads. The program may request more memory when needed but very small values will cause it to slow down"
                     "\n\t\t[--cpu|-p (int; def 1)]\t\t\tNumber of CPUs that will process the input files, each file is processed sequentially after distributing to the CPUs"
                     "\n\t\t[--verbose|-e]\t\t\t\tEntertain the user"
                     "\n\t\t[--debug|-b]\t\t\t\tAnnoy the developer"
                     "\n\t\t[--version|-v]\t\t\t\tPrint version and exit"
-                    "\n\n\n",
-            program_name);
+                    "\n\n\n");
 }
 
 int parse_arguments(int argc, char *argv[])
@@ -405,7 +415,7 @@ int parse_arguments(int argc, char *argv[])
     cfg.reverse_files = NULL;
     cfg.ksize = 25;
     cfg.depth = 100;
-    cfg.memory = 10;
+    cfg.memory = 0; // default from INITIAL_CAPACITY - set to be a prime just above 1Gb memory.
     cfg.canonical = 0;
     cfg.version = 0;
 
@@ -449,7 +459,8 @@ int parse_arguments(int argc, char *argv[])
             break;
         case 'h':
             cfg.help = 1;
-            return 0;
+            print_usage();
+            exit(EXIT_SUCCESS);
         case 'p':
             cfg.cpus = atoi(optarg);
             break;
@@ -1562,8 +1573,7 @@ int main(int argc, char *argv[])
     memset(&cfg, 0, sizeof(struct config_t));
     if (!parse_arguments(argc, argv))
     {
-        printf("Issue parsing options\n");
-        print_usage(argv[0]);
+        print_usage();
         return 1;
     }
 
