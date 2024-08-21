@@ -1,4 +1,4 @@
-#define VERSION 20240820
+#define VERSION 20240821
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -131,6 +131,7 @@ struct config_t
     int canonical;
     int memory;
     size_t initial_hash_size;
+    int version;
 } cfg;
 
 typedef struct
@@ -366,9 +367,24 @@ void thread_pool_add_job(ThreadPool *pool, void (*function)(void *), void *argum
 
 void print_usage(char *program_name)
 {
-    fprintf(stderr, "Usage: %s\t--forward file1 [file2+] --reverse file1 [file2+] [--ksize (int 5-32; def. 25)] [--depth|-d (int; def. 100)]\n\
-    \t\t\t[--coverage|g (float 0-1; def. 0.9)] [--canonical|c] --filetype|-t (fq|fa; def. fq)] [--outformat|o (fq|fq; def. fq)] \n\
-    [--memory_starting|m (int; def. 150000001)] [--cpu|-p (int; def 1)] [--verbose] [--debug|-b]\n",
+    fprintf(stderr, "Usage: %s"
+                    "\n\n\t\tMandatory:"
+                    "\n\t\t* --forward|-f file1 [file2+]\tList of forward (read1) sequence files"
+                    "\n\t\t* --reverse|-r file1 [file2+]\tList of reverse (read2) sequence files"
+                    "\n\n\t\tOptional:"
+                    "\n\t\t[--ksize|-k (integer 5-32; def. 25)]\tNumber of what size of K to use (must be between 5 and 32)"
+                    "\n\t\t[--depth|-d (integer; def. 100)]\tNumber determining when a kmer is tagged as high coverage (defaults to 100),"
+                    "\n\t\t\t\t\t\t\tmust be above 2xCPU count as each CPU calculates depth independently"
+                    "\n\t\t[--coverage|-g (float 0-1; def. 0.9)]\tProportion (0-1) of sequence that must be covered by high coverage kmers before tagging as redundant"
+                    "\n\t\t[--canonical|-c]\t\t\tFlag to ask the program to merge kmers from forward and reverse complement forms (e.g. for DNA-Seq or unstranded RNA-Seq)"
+                    "\n\t\t[--filetype|-t (fq|fa; def. fq)]\tWhether the input files are fastq or fasta"
+                    "\n\t\t[--outformat|-o (fq|fq; def. fq)]\tWhether you want the output files as fastq or fasta (e.g. for Trinity)"
+                    "\n\t\t[--memory_start|-m (integer; def. 10)]\tNumber in Gb of the total memory the program will initially allocate across all threads. The program may request more memory when needed but very small values will cause it to slow down"
+                    "\n\t\t[--cpu|-p (int; def 1)]\t\t\tNumber of CPUs that will process the input files, each file is processed sequentially after distributing to the CPUs"
+                    "\n\t\t[--verbose|-e]\t\t\t\tEntertain the user"
+                    "\n\t\t[--debug|-b]\t\t\t\tAnnoy the developer"
+                    "\n\t\t[--version|-v]\t\t\t\tPrint version and exit"
+                    "\n\n\n",
             program_name);
 }
 
@@ -389,8 +405,9 @@ int parse_arguments(int argc, char *argv[])
     cfg.reverse_files = NULL;
     cfg.ksize = 25;
     cfg.depth = 100;
-    cfg.memory = 0;
+    cfg.memory = 10;
     cfg.canonical = 0;
+    cfg.version = 0;
 
     static struct option long_options[] = {
         {"forward", required_argument, 0, 'f'},
@@ -401,17 +418,18 @@ int parse_arguments(int argc, char *argv[])
         {"filetype", required_argument, 0, 't'},
         {"outformat", required_argument, 0, 'o'},
         {"cpu", required_argument, 0, 'p'},
-        {"memory_starting", required_argument, 0, 'm'},
+        {"memory_start", required_argument, 0, 'm'},
         {"debug", required_argument, 0, 'b'},
-        {"verbose", no_argument, 0, 'v'},
+        {"verbose", no_argument, 0, 'e'},
         {"help", no_argument, 0, 'h'},
         {"canonical", no_argument, 0, 'c'},
+        {"version", no_argument, 0, 'v'},
         {0, 0, 0, 0}};
 
     int opt;
     int option_index = 0;
 
-    while ((opt = getopt_long(argc, argv, "f:r:k:d:g:t:o:p:m:b:vhc", long_options, &option_index)) != -1)
+    while ((opt = getopt_long(argc, argv, "f:r:k:d:g:t:o:p:m:b:ehcv", long_options, &option_index)) != -1)
     {
         switch (opt)
         {
@@ -451,6 +469,11 @@ int parse_arguments(int argc, char *argv[])
             cfg.coverage = atof(optarg);
             break;
         case 'v':
+            cfg.version = 1;
+            printf("%d\n", VERSION);
+            exit(EXIT_SUCCESS);
+            break;
+        case 'e':
             cfg.verbose = 1;
             break;
         case 't':
@@ -522,12 +545,11 @@ int parse_arguments(int argc, char *argv[])
         printf("\n");
     }
 
-    if (cfg.forward_file_count == 0 || cfg.reverse_file_count == 0 || cfg.ksize <= 0 || cfg.depth <= 0 || cfg.coverage < 0 || cfg.coverage > 1)
+    if (strcmp(cfg.informat, "fa") == 0 && strcmp(cfg.outformat, "fq") == 0)
     {
-        printf("ERROR: Provided options: fwd %d rev %d ksize %d depth %d coverage %.2f\n", cfg.forward_file_count, cfg.reverse_file_count, cfg.ksize, cfg.depth, cfg.coverage);
+        fprintf(stderr, "Error: cannot request an output format of FASTQ when input is FASTA\n");
         return 0;
     }
-
     if (cfg.forward_file_count != cfg.reverse_file_count)
     {
         fprintf(stderr, "Error: Number of forward (%d) and reverse files (%d) must match\n", cfg.forward_file_count, cfg.reverse_file_count);
@@ -558,6 +580,12 @@ int parse_arguments(int argc, char *argv[])
         fprintf(stderr, "Error: Depth must be at least 2 x number of CPUs (for performance reasons; but this version of the program is written to normalise to 50+\n");
         return 0;
     }
+    if (cfg.forward_file_count == 0 || cfg.reverse_file_count == 0 || cfg.ksize <= 0 || cfg.depth <= 0 || cfg.coverage <= 0 || cfg.coverage > 1)
+    {
+        printf("ERROR: Wrong options somewhere: fw files: %d rev files: %d ksize: %d depth cutoff: %d coverage cutoff: %.2f\n", cfg.forward_file_count, cfg.reverse_file_count, cfg.ksize, cfg.depth, cfg.coverage);
+        return 0;
+    }
+
     // since we're processing each thread chunk separately.
     cfg.depth = cfg.depth / cfg.cpus;
     cfg.initial_hash_size = (cfg.memory > 0) ? memoryGB2capacity(cfg.memory) : INITIAL_CAPACITY;
