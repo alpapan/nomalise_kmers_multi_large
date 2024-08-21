@@ -14,7 +14,7 @@
 #include <getopt.h>
 #include <stdbool.h>
 
-// [ ] - AP 20240821 TODO: remove redundant code
+// [ ] - AP 20240821 TODO: remove redundant and debugging code
 // [x] - i attempted to integrated a job queue system but then realised it wouldn't actually improve performance;
 //        file is still wholly read while converting records to bytes and sending them to the queue.
 //        it would only help if the file was not memory mapped as it wouldn't need to store data in memory. but with mmap there is no benefit?
@@ -86,7 +86,6 @@ typedef struct
     size_t processed_count;
     size_t printed_count;
     size_t skipped_count;
-    size_t total_kmers;
     time_t last_report_time;
     int last_report_count;
     FILE *thread_output_forward;
@@ -108,7 +107,7 @@ struct reporting_t
     size_t total_processed;
     size_t total_printed;
     size_t total_skipped;
-    size_t total_kmers;
+    size_t max_total_kmers;
     int files_processed;
 } reporting;
 
@@ -199,7 +198,6 @@ const char *get_canonical_kmer(const char *kmer, int k);
 ////
 size_t find_thread_exact_end(char *data, size_t start_pos, size_t end_pos);
 void calculate_thread_positions(char *data, size_t total_file_size, int thread_count, size_t **thread_starts, size_t **thread_ends);
-void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id);
 void *process_thread_chunk(void *arg);
 int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
 
@@ -1144,56 +1142,123 @@ size_t count_records_seqfile(char *data, size_t size)
 //     return (size_t)-1;
 // }
 
-void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id)
+bool is_valid_sequence_pair(const char *fwd_seq, const char *rev_seq, int thread_id, int K)
 {
-    *seq_high_count_kmers = 0;
-    *total_seq_kmers = 0;
-    replacestr(seq, "N", "A");
-    int seq_len = strlen(seq);
-
-    if (valid_dna(seq) == false)
+    replacestr(fwd_seq, "N", "A");
+    replacestr(rev_seq, "N", "A");
+    int fwd_seq_len = strlen(fwd_seq);
+    int rev_seq_len = strlen(rev_seq);
+    if (fwd_seq_len < K)
     {
-        printf("FATAL: sequence does not appear to be a DNA sequence\n%s\n\n", seq);
+        // if (cfg.debug > 1)
+        //     printf("Thread %d - Sequence FWD skipped due to length shorter than K\n%s\n\n", thread_id, fwd_seq);
+
+        return false;
+    }
+    if (rev_seq_len < K)
+    {
+        // if (cfg.debug > 1)
+        //     printf("Thread %d - Sequence REV skipped due to length shorter than K\n%s\n\n", thread_id, rev_seq);
+
+        return false;
+    }
+
+    if (valid_dna(fwd_seq) == false)
+    {
+        fprintf(stderr, "FATAL: Thread %d - FWD sequence does not appear to be a DNA sequence\n%s\n\n", thread_id, fwd_seq);
+        exit(EXIT_FAILURE);
+    }
+    if (valid_dna(rev_seq) == false)
+    {
+        fprintf(stderr, "FATAL: Thread %d - REV sequence does not appear to be a DNA sequence\n%s\n\n", thread_id, rev_seq);
         exit(EXIT_FAILURE);
     }
 
-    if (seq_len >= K)
+    return true;
+}
+
+bool process_sequence_pair(const char *fwd_seq, const char *rev_seq, hash_table_t *hash_table, int *fwd_seq_high_count_kmers, int *fwd_total_seq_kmers, int *rev_seq_high_count_kmers, int *rev_total_seq_kmers, int thread_id, int K, int depth_per_cpu)
+{
+    if (is_valid_sequence_pair(fwd_seq, rev_seq, thread_id, K) == false)
+        return false;
+
+    *fwd_seq_high_count_kmers = 0;
+    *fwd_total_seq_kmers = 0;
+
+    for (int i = 0; i <= strlen(fwd_seq) - K; i++)
     {
-        for (int i = 0; i <= seq_len - K; i++)
+        char kmer[K + 1];
+        strncpy(kmer, fwd_seq + i, K);
+        kmer[K] = '\0';
+
+        uint64_t hash = 0;
+
+        if (cfg.canonical == 1)
         {
-            char kmer[K + 1];
-            strncpy(kmer, seq + i, K);
-            kmer[K] = '\0';
+            const char *canonical_kmer = get_canonical_kmer(kmer, K);
+            hash = encode_kmer_plain(canonical_kmer, K);
+        }
+        else
+        {
+            hash = encode_kmer_plain(kmer, K);
+        }
 
-            uint64_t hash = 0;
+        // this actually means hashing failed so it shouldn't occur but check so we don't get segfault
+        if (hash == 0)
+            continue;
 
-            if (cfg.canonical == 1)
-            {
-                const char *canonical_kmer = get_canonical_kmer(kmer, K);
-                hash = encode_kmer_plain(canonical_kmer, K);
-            }
-            else
-            {
-                hash = encode_kmer_plain(kmer, K);
-            }
+        (*fwd_total_seq_kmers)++;
+        size_t index = store_kmer(hash_table, hash, thread_id);
 
-            if (hash == 0)
-                continue;
-
-            (*total_seq_kmers)++;
-            size_t index = store_kmer(hash_table, hash, thread_id);
-
-            if (index < 0)
-            {
-                fprintf(stderr, "ERROR3: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
-                exit(EXIT_FAILURE);
-            }
-            if (hash_table->entries[index].count >= NORM_DEPTH)
-            {
-                (*seq_high_count_kmers)++;
-            }
+        if (index < 0)
+        {
+            fprintf(stderr, "ERROR3: Thread %d - This shouldnt have happened, index %zu hash %zu capacity %zu\n", thread_id, index, hash, hash_table->capacity);
+            exit(EXIT_FAILURE);
+        }
+        if (hash_table->entries[index].count >= depth_per_cpu)
+        {
+            (*fwd_seq_high_count_kmers)++;
         }
     }
+
+    *rev_seq_high_count_kmers = 0;
+    *rev_total_seq_kmers = 0;
+    for (int i = 0; i <= strlen(rev_seq) - K; i++)
+    {
+        char kmer[K + 1];
+        strncpy(kmer, rev_seq + i, K);
+        kmer[K] = '\0';
+
+        uint64_t hash = 0;
+
+        if (cfg.canonical == 1)
+        {
+            const char *canonical_kmer = get_canonical_kmer(kmer, K);
+            hash = encode_kmer_plain(canonical_kmer, K);
+        }
+        else
+        {
+            hash = encode_kmer_plain(kmer, K);
+        }
+
+        // this actually means hashing failed so it shouldn't occur.
+        if (hash == 0)
+            continue;
+
+        (*rev_total_seq_kmers)++;
+        size_t index = store_kmer(hash_table, hash, thread_id);
+
+        if (index < 0)
+        {
+            fprintf(stderr, "ERROR3: Thread %d - This shouldnt have happened, index %zu hash %zu capacity %zu\n", thread_id, index, hash, hash_table->capacity);
+            exit(EXIT_FAILURE);
+        }
+        if (hash_table->entries[index].count >= depth_per_cpu)
+        {
+            (*rev_seq_high_count_kmers)++;
+        }
+    }
+    return true;
 }
 
 void *process_thread_chunk(void *arg)
@@ -1201,11 +1266,17 @@ void *process_thread_chunk(void *arg)
     thread_data_t *data = (thread_data_t *)arg;
     // generic
     int lines_to_read = cfg.is_input_fastq == true ? 4 : 2;
-    char forward_record[lines_to_read][MAX_LINE_LENGTH], reverse_record[lines_to_read][MAX_LINE_LENGTH];
     hash_table_t *local_hash_table = data->hash_table;
     int thread_id = data->thread_id;
     FILE *output_forward = data->thread_output_forward;
     FILE *output_reverse = data->thread_output_reverse;
+    // so we don't keep accessing it.
+    int K = cfg.ksize;
+    int depth_per_cpu = cfg.depth;
+    int debug = cfg.debug;
+    bool is_input_fastq = cfg.is_input_fastq;
+    bool is_output_fastq = cfg.is_output_fastq;
+    float coverage = cfg.coverage;
 
     // input file
     char *forward_pointer = data->forward_data + data->forward_file_start;
@@ -1224,6 +1295,7 @@ void *process_thread_chunk(void *arg)
     if (cfg.verbose)
         printf("Thread %d started; processing %d lines per record\n", thread_id, lines_to_read);
 
+    // all checks in here may slow down things
     while (forward_pointer < data->forward_data + data->forward_file_end &&
            reverse_pointer < data->reverse_data + data->reverse_file_end)
     {
@@ -1231,7 +1303,8 @@ void *process_thread_chunk(void *arg)
         bool valid_record = true;
         int seq_high_count_kmers_forward = 0, total_seq_kmers_forward = 0;
         int seq_high_count_kmers_reverse = 0, total_seq_kmers_reverse = 0;
-        int seq_index = 1; // line with dna sequence, always 1 in this implementation.
+
+        char forward_record[lines_to_read][MAX_LINE_LENGTH], reverse_record[lines_to_read][MAX_LINE_LENGTH];
 
         // read pair
         for (int i = 0; i < lines_to_read; i++)
@@ -1249,48 +1322,51 @@ void *process_thread_chunk(void *arg)
         if (!valid_record)
             break;
 
-        if (lines_to_read == 4 && strlen(forward_record[1]) != strlen(forward_record[3]))
-        {
-            printf("ERROR! fwd sequence line and quality line are not the same size\n1:\t%s\n2:\t%s\n3:\t%s\n4:\t%s\n\n", forward_record[0], forward_record[1], forward_record[2], forward_record[3]);
-            exit(EXIT_FAILURE);
-        }
-        if (lines_to_read == 4 && strlen(reverse_record[1]) != strlen(reverse_record[3]))
-        {
-            printf("ERROR! rev sequence line and quality line are not the same size\n1:\t%s\n2:\t%s\n3:\t%s\n4:\t%s\n\n", reverse_record[0], reverse_record[1], reverse_record[2], reverse_record[3]);
-            exit(EXIT_FAILURE);
-        }
+        // if (debug > 2)
+        // {
+        //     printf("DEBUG: Thread %d - Processing sequence pair %'zu\n", thread_id, data->processed_count);
+        //     printf("DEBUG: Forward sequence: %.50s...\n", forward_record[1]);
+        //     printf("DEBUG: Reverse sequence: %.50s...\n", reverse_record[1]);
+        // }
 
-        if (cfg.debug > 2)
-        {
-            printf("DEBUG: Thread %d - Processing sequence pair %'zu\n", thread_id, data->processed_count);
-            printf("DEBUG: Forward sequence: %.50s...\n", forward_record[seq_index]);
-            printf("DEBUG: Reverse sequence: %.50s...\n", reverse_record[seq_index]);
-        }
+        ////////////////////////////////////////////////////////////////////
+        // TODO we should have a user option to turn off these sanity checks.
+        // tests showed it went from 25k to 32k seqs per second
+        ////////////////////////////////////////////////////////////////////
+        // int forward_seq_len = strlen(forward_record[1]);
+        // int reverse_seq_len = strlen(reverse_record[1]);
+        // if (lines_to_read == 4 && forward_seq_len != strlen(forward_record[3]))
+        // {
+        //     printf("ERROR! Thread %d - fwd sequence line and quality line are not the same size\n1:\t%s\n2:\t%s\n3:\t%s\n4:\t%s\n\n", thread_id, forward_record[0], forward_record[1], forward_record[2], forward_record[3]);
+        //     exit(EXIT_FAILURE);
+        // }
+        // if (lines_to_read == 4 && reverse_seq_len != strlen(reverse_record[3]))
+        // {
+        //     printf("ERROR! Thread %d - rev sequence line and quality line are not the same size\n1:\t%s\n2:\t%s\n3:\t%s\n4:\t%s\n\n", thread_id, reverse_record[0], reverse_record[1], reverse_record[2], reverse_record[3]);
+        //     exit(EXIT_FAILURE);
+        // }
 
-        int forward_seq_len = strlen(forward_record[seq_index]);
-        int reverse_seq_len = strlen(reverse_record[seq_index]);
-        if (forward_seq_len < cfg.ksize || reverse_seq_len < cfg.ksize)
-        {
-            data->skipped_count++;
-            if (cfg.debug)
-            {
-                printf("Sequence pair %'zu skipped due to short length (F:%d;R:%d)\n", data->processed_count, forward_seq_len, reverse_seq_len);
-            }
-            continue; // Skip to the next record
-        }
-        process_sequence(forward_record[seq_index], local_hash_table, cfg.ksize, cfg.depth, &seq_high_count_kmers_forward, &total_seq_kmers_forward, thread_id);
-        process_sequence(reverse_record[seq_index], local_hash_table, cfg.ksize, cfg.depth, &seq_high_count_kmers_reverse, &total_seq_kmers_reverse, thread_id);
+        ////////////////////////////////////////////////////////////////////
+        ////////////////////////////////////////////////////////////////////
+        ////////////////////////////////////////////////////////////////////
+
+        // this function already checks if seq is less than k but it doesn't check if both sequences are.
+        // todo: change sequence to make only a single call, fwd and reverse, return boolean to use for skipping.
+        bool process_success = process_sequence_pair(forward_record[1], reverse_record[1], local_hash_table, &seq_high_count_kmers_forward, &total_seq_kmers_forward, &seq_high_count_kmers_reverse, &total_seq_kmers_reverse, thread_id, K, depth_per_cpu);
+        // process_sequence(reverse_record[1], local_hash_table, cfg.ksize, cfg.depth, &seq_high_count_kmers_reverse, &total_seq_kmers_reverse, thread_id);
+        if (process_success == false)
+            continue;
+
+        data->processed_count++;
 
         int seq_high_count_kmers = seq_high_count_kmers_forward + seq_high_count_kmers_reverse;
         int total_seq_kmers = total_seq_kmers_forward + total_seq_kmers_reverse;
         float high_count_ratio = total_seq_kmers > 0 ? (float)seq_high_count_kmers / total_seq_kmers : 0;
 
-        data->processed_count++;
-
         bool is_printed = false;
-        if (high_count_ratio <= cfg.coverage)
+        if (high_count_ratio <= coverage)
         {
-            if (cfg.is_input_fastq == true && cfg.is_output_fastq == false)
+            if (is_input_fastq == true && is_output_fastq == false)
             {
                 char forward_record_fasta[MAX_LINE_LENGTH * 2] = {0};
                 fastq_to_fasta(&forward_record, forward_record_fasta, true);
@@ -1317,8 +1393,8 @@ void *process_thread_chunk(void *arg)
             is_printed = false;
         }
 
-        // debug report
-        if (cfg.debug > 1)
+        // debug report (this check isn't a massive hit)
+        if (debug > 1)
         {
 
             if (is_printed == true)
@@ -1330,11 +1406,11 @@ void *process_thread_chunk(void *arg)
                 printf("Thread %d - Sequence pair %'zu SKIPPED: ", thread_id, data->processed_count);
             }
             printf("High (%d) count kmers: F:%d;R:%d;B:%d, Total unique kmers: F:%d;R:%d;B:%d, High (%d) count ratio: %.2f\n",
-                   cfg.depth,
+                   depth_per_cpu,
                    seq_high_count_kmers_forward,
                    seq_high_count_kmers_reverse, seq_high_count_kmers,
                    total_seq_kmers_forward, total_seq_kmers_reverse, total_seq_kmers,
-                   cfg.depth,
+                   depth_per_cpu,
                    high_count_ratio);
         }
         sequences_processed++;
@@ -1342,7 +1418,7 @@ void *process_thread_chunk(void *arg)
         current_time = time(NULL);
         if (difftime(current_time, data->last_report_time) >= REPORTING_INTERVAL)
         {
-            if (cfg.debug > 1)
+            if (debug > 1)
                 printf("reporting after %d seconds\n", REPORTING_INTERVAL);
 
             double elapsed_time = difftime(current_time, data->last_report_time);
@@ -1354,7 +1430,7 @@ void *process_thread_chunk(void *arg)
             float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
             float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
             float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
-            printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences/s, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total unique kmers across all sequences: %'zu (%+.2f%%)\n",
+            printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences/s, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Unique kmers (all sequences; this thread): %'zu (%+.2f%%)\n",
                    thread_id, rate, prev_rate_improvement * 100,
                    data->processed_count,
                    data->printed_count,
@@ -1373,6 +1449,8 @@ void *process_thread_chunk(void *arg)
         }
     }
 
+    // chunk finished processing
+
     if (cfg.verbose)
         printf("Thread %d: completed processing file\n", thread_id);
 
@@ -1385,7 +1463,7 @@ void *process_thread_chunk(void *arg)
     float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
     float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
     float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
-    printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences/s, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Total unique kmers across all sequences: %'zu (%+.2f%%)\n",
+    printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences/s, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Unique kmers (all sequences; this thread): %'zu (%+.2f%%)\n",
            thread_id, rate, prev_rate_improvement * 100,
            data->processed_count,
            data->printed_count,
@@ -1408,7 +1486,7 @@ void *process_thread_chunk(void *arg)
 int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap)
 {
     char stop_char = cfg.is_input_fastq == false ? '>' : '@';
-
+    size_t max_total_kmers_in_threads = 0;
     pthread_t threads[cfg.cpus];
 
     // let's get start and ends for the mmapped file.
@@ -1534,19 +1612,21 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
 
     // final report
     size_t total_processed = 0, total_printed = 0, total_skipped = 0;
-    for (int i = 0; i < cfg.cpus; i++)
+    for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
     {
-        total_processed += thread_data[i].processed_count;
-        total_printed += thread_data[i].printed_count;
-        total_skipped += thread_data[i].skipped_count;
+        total_processed += thread_data[thread_number].processed_count;
+        total_printed += thread_data[thread_number].printed_count;
+        total_skipped += thread_data[thread_number].skipped_count;
+        max_total_kmers_in_threads = (max_total_kmers_in_threads < thread_data[thread_number].hash_table->used) ? thread_data[thread_number].hash_table->used : max_total_kmers_in_threads;
     }
     reporting.total_processed = total_processed;
     reporting.total_printed = total_printed;
     reporting.total_skipped = total_skipped;
     reporting.files_processed++;
+    reporting.max_total_kmers = (reporting.max_total_kmers < max_total_kmers_in_threads) ? max_total_kmers_in_threads : reporting.max_total_kmers;
 
-    printf("File's statistics: Processed %'zu, Printed %'zu, Skipped %'zu\n",
-           total_processed, total_printed, total_skipped);
+    printf("File's statistics: Processed %'zu, Printed %'zu, Skipped %'zu, Max Unique Kmers in a thread: %'zu\n",
+           total_processed, total_printed, total_skipped, max_total_kmers_in_threads);
 
     free(forward_thread_starts);
     free(forward_thread_ends);
@@ -1567,7 +1647,7 @@ int main(int argc, char *argv[])
     reporting.total_processed = 0;
     reporting.total_printed = 0;
     reporting.total_skipped = 0;
-    reporting.total_kmers = 0;
+    reporting.max_total_kmers = 0;
     reporting.files_processed = 0;
 
     memset(&cfg, 0, sizeof(struct config_t));
@@ -1586,7 +1666,6 @@ int main(int argc, char *argv[])
         thread_data[thread_number].processed_count = 0;
         thread_data[thread_number].printed_count = 0;
         thread_data[thread_number].skipped_count = 0;
-        thread_data[thread_number].total_kmers = 0;
         thread_data[thread_number].last_report_time = time(NULL);
         thread_data[thread_number].last_report_count = 0;
 
@@ -1668,6 +1747,7 @@ int main(int argc, char *argv[])
     printf("Processed Records: %'zu\n", reporting.total_processed);
     printf("Printed Records: %'zu\n", reporting.total_printed);
     printf("Skipped Records: %'zu\n", reporting.total_skipped);
+    printf("Max unique kmers in any thread: %'zu\n", reporting.max_total_kmers);
     // we can't get this if we have multiple threads unless we merge the tables, is it worth it?
     //    printf("Total unique kmers across all sequences: %'zu\n", reporting.total_kmers);
 
