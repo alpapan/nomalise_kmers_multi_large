@@ -1,4 +1,4 @@
-= Normalise reads using a kmer function
+## Normalise reads using a kmer function
 
 Takes a few Tb of paired end Illumina data and then removes redundancy. 
 Pretty useful for RNA-Seq and a drop-in replacement for Trinity's normalisation (use `Trinity --no_normalize_reads`).
@@ -10,7 +10,7 @@ Processing rate: 21,497 (+10.85%) sequences per second, processed 245,869,236 pa
 File's statistics: Processed 2,458,692,374, Printed 349,654,749, Skipped 2,109,037,625
 ```
 
-Compile:
+### Compile:
 
 ```bash
 gcc -o normalise_kmers_multi_large normalise_kmers_multi_large.c -lpthreads
@@ -18,8 +18,10 @@ gcc -o normalise_kmers_multi_large normalise_kmers_multi_large.c -lpthreads
 
 I will write this at some point, in the meantime here is the helpful help:
 
+### Usage
+
 ```bash
-Usage:
+
 
                 Mandatory:
                 * --forward|-f file1 [file2+]   List of forward (read1) sequence files
@@ -45,5 +47,29 @@ The --coverage controls how much redundancy you want to remove. It defaults to 0
 
 I would recommend it is used on at least 200 Gb worth of input FASTQ data, otherwise you might have to use --cpu 1 to remove enough redundancy.
 
-NB to developers: normalise_kmers_multi is an older version that uses a shared kmer table. It also needs some bugfixes to be backported to it.
-It is far less performant due to the need to sync kmer tables and the gain is minimal for the average project.
+### Performance and Warnings
+
+- It is fast (but could be faster), it processes 1.4 Tb of FASTQ in 7h using 10 CPUs, scaling pretty linearly.
+- Memory is dictated by the data. Each unique kmer takes 16 bytes of memory per CPU so that 350 million kmers would need ~ 5Gb of RAM per CPU.
+- There is no shared kmer table, each thread is independent (hence the speed).
+- Light on the I/O: Input files are memory mapped.
+- Output files can be made Trinity friendly with --outformat fa, no more wasted I/O!
+
+```bash
+--- Final Report ---
+Processed Records: 2,987,923,777
+Printed Records: 352,574,553
+Skipped Records: 2,635,349,224
+Total runtime: 24569.00 seconds
+Overall processing rate: 121,614 sequences per second
+136874.68user 1179.63system 6:49:28elapsed 561%CPU (0avgtext+0avgdata 142760856maxresident)k
+2713964272inputs+339317512outputs (170major+100520914minor)pagefaults 0swaps
+
+Input size: 1.4T
+Output size: 162G
+```
+
+NB to developers: Do not use normalise_kmers_multi. 
+It is an older version that uses a shared kmer table.
+It also needs some bugfixes to be backported to it.
+It is far less performant due to the need to sync kmer tables and the gain is minimal for the large datasets you'd need normalisation for.
