@@ -389,7 +389,7 @@ void print_usage()
                     "\n\t\t[--coverage|-g (float 0-1; def. 0.9)]\tProportion (0-1) of sequence that must be covered by high coverage kmers before tagging as redundant"
                     "\n\t\t[--canonical|-c]\t\t\tFlag to ask the program to merge kmers from forward and reverse complement forms (e.g. for DNA-Seq or unstranded RNA-Seq)"
                     "\n\t\t[--filetype|-t (fq|fa; def. fq)]\tWhether the input files are fastq or fasta"
-                    "\n\t\t[--outformat|-o (fq|fq; def. fq)]\tWhether you want the output files as fastq or fasta (e.g. for Trinity)"
+                    "\n\t\t[--outformat|-o (fq|fa; def. fq)]\tWhether you want the output files as fastq or fasta (e.g. for Trinity)"
                     "\n\t\t[--memory_start|-m (integer; def. 1)]\tNumber in Gb of the total memory the program will initially allocate across all threads. The program may request more memory when needed but very small values will cause it to slow down"
                     "\n\t\t[--cpu|-p (int; def 1)]\t\t\tNumber of CPUs that will process the input files, each file is processed sequentially after distributing to the CPUs"
                     "\n\t\t[--verbose|-e]\t\t\t\tEntertain the user"
