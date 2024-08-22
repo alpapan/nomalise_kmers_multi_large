@@ -28,6 +28,7 @@ I will write this at some point, in the meantime here is the helpful help:
                 * --reverse|-r file1 [file2+]   List of reverse (read2) sequence files
 
                 Optional:
+                [--single|-s] data are single ended, any --forward files not matched with --reverse will be treated as single-end
                 [--ksize|-k (integer 5-32; def. 25)]    Number of what size of K to use (must be between 5 and 32)
                 [--depth|-d (integer; def. 100)]        Number determining when a kmer is tagged as high coverage (defaults to 100),
                                                         must be above 2xCPU count as each CPU calculates depth independently

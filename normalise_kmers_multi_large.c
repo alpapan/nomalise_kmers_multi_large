@@ -1,5 +1,51 @@
-#define VERSION 20240821
+#define VERSION 20240822
 // NB: written with some AI assistance
+
+/////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////
+// DONE to think: a compromise for not using a shared kmer table would be to
+// use 1 thread to process the first X (2-3?) million pairs of the first(?) file pair to seed the table
+// that wouldn't need to parse the entire file, just process until Xm records are done
+// it should take about 3-5 minutes at 10k reads per sec.
+// then copy that kmer table to every other thread.
+// for simplicity and consistency (and speed by avoiding write i/o), we could
+// not print any output during seeding and just process the entire file again
+// (it will have to be parsed for line counting read anyway)
+// 20240822: this has now been done
+
+// DONE: support single end data
+// 20240822: this has now been done
+
+// TODO: provide advice that input data should be adaptor/quality trimmed
+// noting that i haven't tested that (and non-trimmed files will be faster to process
+// due to fwd/rev file sizes/record boundaries being identical).
+
+// TODO: provide advice that two rounds of normalisations may be better especially if have lots of files.
+// split the work into two sets between two computers and then run it a second time with more stringent --coverage
+
+// TODO: some peculiar behaviour found after double processin
+// i used 10 threads and --coverage 0.96 and then 0.98 to process 3.4Tb -> 500 Gb ->
+// the second round's thread 0 and 1 found quite a bit of redundancy (0 was 33% and 1 was 15%) but not other threads.
+// more concerning is that the number of unique kmers were much lower in thread0/1.
+// i have no idea why this could be so since each thread is independent processing a portion of a file:
+//
+// Thread 0 - Processing rate: 17,950 (+0.00%) sequences/s, processed 16,676,541 pairs, printed: 9,807,759 (+2.81%), skipped: 6,868,782 (+13.34%), Unique kmers (all sequences; this thread): 145,068,177 (+2.06%)
+// Thread 1 - Processing rate: 17,042 (+0.00%) sequences/s, processed 16,622,086 pairs, printed: 12,601,054 (+3.37%), skipped: 4,021,032 (+17.93%), Unique kmers (all sequences; this thread): 187,553,106 (+2.31%)
+// Thread 2 - Processing rate: 15,679 (+0.00%) sequences/s, processed 16,540,264 pairs, printed: 15,043,236 (+4.45%), skipped: 1,497,028 (+25.07%), Unique kmers (all sequences; this thread): 240,241,727 (+2.10%)
+// Thread 3 - Processing rate: 15,229 (+0.00%) sequences/s, processed 16,513,297 pairs, printed: 15,889,814 (+5.36%), skipped: 623,483 (+20.21%), Unique kmers (all sequences; this thread): 274,340,123 (+2.52%)
+// Thread 4 - Processing rate: 15,551 (+0.00%) sequences/s, processed 16,532,616 pairs, printed: 15,526,649 (+5.15%), skipped: 1,005,967 (+20.71%), Unique kmers (all sequences; this thread): 274,321,928 (+2.79%)
+// Thread 5 - Processing rate: 16,315 (+0.00%) sequences/s, processed 16,578,460 pairs, printed: 16,331,745 (+5.93%), skipped: 246,715 (+35.79%), Unique kmers (all sequences; this thread): 294,211,911 (+2.77%)
+// Thread 6 - Processing rate: 16,117 (+0.00%) sequences/s, processed 16,566,560 pairs, printed: 16,290,330 (+6.07%), skipped: 276,230 (+14.73%), Unique kmers (all sequences; this thread): 305,058,106 (+2.96%)
+// Thread 7 - Processing rate: 15,301 (+0.00%) sequences/s, processed 16,517,591 pairs, printed: 16,427,108 (+5.84%), skipped: 90,483 (+13.79%), Unique kmers (all sequences; this thread): 324,452,671 (+2.58%)
+// Thread 8 - Processing rate: 15,645 (+0.00%) sequences/s, processed 16,538,238 pairs, printed: 16,508,447 (+5.96%), skipped: 29,791 (+46.80%), Unique kmers (all sequences; this thread): 332,330,298 (+2.76%)
+// Thread 9 - Processing rate: 16,930 (+0.00%) sequences/s, processed 16,615,328 pairs, printed: 16,580,786 (+6.45%), skipped: 34,542 (+44.09%), Unique kmers (all sequences; this thread): 330,700,470 (+2.99%)
+// this only happens for files produced by the later threads... what is different between threads except file coordinates?
+// and it's only to do with the output, not input
+//
+//
+
+/////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,17 +93,18 @@
 
 #define MAX_LINE_LENGTH 1024
 #define MAX_OUTPUT_LENGTH 8192
-#define CHUNK_SIZE 1000000
+#define CHUNK_SIZE 1e6
 #define MAX_THREADS 256
 #define TABLE_LOAD_FACTOR 0.8
 #define MAX_K 32
 #define REPORTING_INTERVAL 60 // seconds
+#define SEED_NUMBER 3e6
 
-    // lookup table, including lower case (Just In Case(TM))
+// lookup table, including lower case (Just In Case(TM))
 
-    static const uint8_t base_map[256] = {
-        ['A'] = 0x00, ['C'] = 0x01, ['G'] = 0x02, ['T'] = 0x03
-        // , ['a'] = 0x00, ['c'] = 0x01, ['g'] = 0x02, ['t'] = 0x03 // assume uppercase
+static const uint8_t base_map[256] = {
+    ['A'] = 0x00, ['C'] = 0x01, ['G'] = 0x02, ['T'] = 0x03
+    // , ['a'] = 0x00, ['c'] = 0x01, ['g'] = 0x02, ['t'] = 0x03 // assume uppercase
 };
 static const char rev_base_map[4] = {'A', 'C', 'G', 'T'};
 
@@ -134,6 +181,7 @@ struct config_t
     int memory;
     size_t initial_hash_size;
     int version;
+    int singleend;
 } cfg;
 
 typedef struct
@@ -161,10 +209,10 @@ typedef struct
 } ThreadPool;
 
 // Function prototypes
-int int_increment_even(int num);
+size_t sizet_increment_even(size_t num);
 char *read_line(char *ptr, char *buffer, int max_length);
 float capacity2memory(size_t capacity);
-float memoryGB2capacity(size_t memory);
+size_t memoryGB2capacity(int memory);
 mmap_file_t mmap_file(const char *filename);
 void munmap_file(mmap_file_t *mf);
 static void replacestr(const char *line, const char *search, const char *replace);
@@ -199,15 +247,18 @@ const char *get_canonical_kmer(const char *kmer, int k);
 
 ////
 size_t find_thread_exact_end(char *data, size_t start_pos, size_t end_pos);
+void sequence_to_hash(const char *seq, hash_table_t *hash_table, int *seq_high_count_kmers, int *total_seq_kmers, int K, int depth_per_cpu);
+bool process_sequence_pair(const char *fwd_seq, const char *rev_seq, hash_table_t *hash_table, int *fwd_seq_high_count_kmers,
+                           int *fwd_total_seq_kmers, int *rev_seq_high_count_kmers, int *rev_total_seq_kmers, int thread_id, int K, int depth_per_cpu);
 void calculate_thread_positions(char *data, size_t total_file_size, int thread_count, size_t **thread_starts, size_t **thread_ends);
-void *process_thread_chunk(void *arg);
-int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
+void *process_thread_chunk_paired(void *arg);
+int multithreaded_process_files_paired(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
 
 ////////////////////////////////////////////////////////////////
 ////////// HELPER FUNCTIONS ////////////////////////////////////
 ////////////////////////////////////////////////////////////////
 
-int int_increment_even(int num)
+size_t sizet_increment_even(size_t num)
 {
     if (num % 2 == 0)
         return num + 1;
@@ -234,16 +285,15 @@ char *read_line(char *ptr, char *buffer, int max_length)
 
 float capacity2memory(size_t capacity)
 {
-    float number = (float)capacity;
-    return number * 16 / 1073741824;
+    return (float)capacity * 16 / 1073741824;
 }
 
-float memoryGB2capacity(size_t memory)
+size_t memoryGB2capacity(int memory)
 {
-    float number = (float)memory * 1073741824;
+    size_t number = (float)memory * 1073741824;
     float total_mem = number / 16;
-    float per_cpu = total_mem / cfg.cpus;
-    return int_increment_even(per_cpu); // not a prime but a bit better than having an even number
+    size_t per_cpu = total_mem / cfg.cpus; // not a prime but a bit better than having an even number
+    return sizet_increment_even(per_cpu);
 }
 
 mmap_file_t mmap_file(const char *filename)
@@ -309,69 +359,7 @@ static void replacestr(const char *line, const char *search, const char *replace
         memcpy(sp, replace, replace_len);
     }
 }
-void thread_pool_init(ThreadPool *pool, pthread_t *threads)
-{
-    pool->head = NULL;
-    pool->tail = NULL;
-    pool->job_count = 0;
-    pool->shutdown = 0;
 
-    pthread_mutex_init(&pool->lock, NULL);
-    pthread_cond_init(&pool->notify, NULL);
-
-    for (int i = 0; i < cfg.cpus; i++)
-    {
-        // pthread_create(&threads[i], NULL, thread_function, NULL);
-    }
-}
-
-void thread_pool_shutdown(ThreadPool *pool, pthread_t *threads)
-{
-    pthread_mutex_lock(&pool->lock);
-    pool->shutdown = 1;
-    pthread_cond_broadcast(&pool->notify);
-    pthread_mutex_unlock(&pool->lock);
-
-    for (int i = 0; i < cfg.cpus; i++)
-    {
-        pthread_join(threads[i], NULL);
-    }
-
-    // Clean up any remaining jobs
-    while (pool->head != NULL)
-    {
-        Job *job = pool->head;
-        pool->head = job->next;
-        free(job);
-    }
-
-    pthread_mutex_destroy(&pool->lock);
-    pthread_cond_destroy(&pool->notify);
-}
-void thread_pool_add_job(ThreadPool *pool, void (*function)(void *), void *argument)
-{
-    Job *job = (Job *)malloc(sizeof(Job));
-    job->function = function;
-    job->argument = argument;
-    job->next = NULL;
-
-    pthread_mutex_lock(&pool->lock);
-
-    if (pool->tail == NULL)
-    {
-        pool->head = job;
-        pool->tail = job;
-    }
-    else
-    {
-        pool->tail->next = job;
-        pool->tail = job;
-    }
-    pool->job_count++;
-
-    pthread_cond_signal(&pool->notify);
-    pthread_mutex_unlock(&pool->lock);
-}
 ////////////////////////////////////////////////////////////////
 ///////////////// ARGUMENTS AND FILES //////////////////////////
 ////////////////////////////////////////////////////////////////
@@ -383,6 +371,7 @@ void print_usage()
                     "\n\t\t* --forward|-f file1 [file2+]\tList of forward (read1) sequence files"
                     "\n\t\t* --reverse|-r file1 [file2+]\tList of reverse (read2) sequence files"
                     "\n\n\t\tOptional:"
+                    "\n\t\t[--single|-s] data are single ended, any --forward files not matched with --reverse will be treated as single-end"
                     "\n\t\t[--ksize|-k (integer 5-32; def. 25)]\tNumber of what size of K to use (must be between 5 and 32)"
                     "\n\t\t[--depth|-d (integer; def. 100)]\tNumber determining when a kmer is tagged as high coverage (defaults to 100),"
                     "\n\t\t\t\t\t\t\tmust be above 2xCPU count as each CPU calculates depth independently"
@@ -419,6 +408,7 @@ int parse_arguments(int argc, char *argv[])
     cfg.memory = 0; // default from INITIAL_CAPACITY - set to be a prime just above 1Gb memory.
     cfg.canonical = 0;
     cfg.version = 0;
+    cfg.singleend = 0;
 
     static struct option long_options[] = {
         {"forward", required_argument, 0, 'f'},
@@ -435,15 +425,19 @@ int parse_arguments(int argc, char *argv[])
         {"help", no_argument, 0, 'h'},
         {"canonical", no_argument, 0, 'c'},
         {"version", no_argument, 0, 'v'},
+        {"single", no_argument, 0, 's'},
         {0, 0, 0, 0}};
 
     int opt;
     int option_index = 0;
 
-    while ((opt = getopt_long(argc, argv, "f:r:k:d:g:t:o:p:m:b:ehcv", long_options, &option_index)) != -1)
+    while ((opt = getopt_long(argc, argv, "f:r:k:d:g:t:o:p:m:b:ehcvs", long_options, &option_index)) != -1)
     {
         switch (opt)
         {
+        case 's':
+            cfg.singleend = 1;
+            break;
         case 'c':
             cfg.canonical = 1;
             break;
@@ -530,26 +524,26 @@ int parse_arguments(int argc, char *argv[])
             return 0;
         }
     }
-
-    // processing after all options parsed:
-    cfg.depth_per_cpu = cfg.depth / cfg.cpus;
-    // since we're processing each thread chunk separately.
-    cfg.initial_hash_size = (cfg.memory > 0) ? memoryGB2capacity(cfg.memory) : INITIAL_CAPACITY;
-    float memory_per_cpu = capacity2memory(cfg.initial_hash_size);
-    printf("Initial hash table size set to %'zu (memory ~ %'0.2f Gb for each of %d threads, ~ %'d Gb total))\n", cfg.initial_hash_size, memory_per_cpu, cfg.cpus, cfg.memory);
-
-    /////////////////////////////////////////////////////////////////////////
-    //////////////      checks       ////////////////////////////////////////
-    /////////////////////////////////////////////////////////////////////////
     if (cfg.verbose)
     {
-        printf("VERSION: %d, CMD: ", VERSION);
+        printf("\nVERSION: %d, CMD: ", VERSION);
         for (int i = 0; i < argc; i++)
         {
             printf("%s ", argv[i]);
         }
         printf("\n\n");
     }
+
+    // processing after all options parsed:
+    cfg.depth_per_cpu = cfg.depth / cfg.cpus;
+    // since we're processing each thread chunk separately.
+    cfg.initial_hash_size = (cfg.memory > 0) ? memoryGB2capacity(cfg.memory) : INITIAL_CAPACITY;
+    float memory_per_cpu = capacity2memory(cfg.initial_hash_size);
+    printf("Initial hash table size set to %'zu (memory ~ %'0.2f Gb for each of %d threads, ~ %'d Gb total))\n\n", cfg.initial_hash_size, memory_per_cpu, cfg.cpus, cfg.memory);
+
+    /////////////////////////////////////////////////////////////////////////
+    //////////////      checks       ////////////////////////////////////////
+    /////////////////////////////////////////////////////////////////////////
     if (cfg.debug > 1)
     {
         printf("Provided forward files: ");
@@ -574,7 +568,7 @@ int parse_arguments(int argc, char *argv[])
         fprintf(stderr, "Error: cannot request an output format of FASTQ when input is FASTA\n");
         return 0;
     }
-    if (cfg.forward_file_count != cfg.reverse_file_count)
+    if (cfg.singleend == 0 && cfg.forward_file_count != cfg.reverse_file_count)
     {
         fprintf(stderr, "Error: Number of forward (%d) and reverse files (%d) must match\n", cfg.forward_file_count, cfg.reverse_file_count);
         return 0;
@@ -658,6 +652,9 @@ void process_forward_files(char *first_file, char **additional_files)
 
 void process_reverse_files(char *first_file, char **additional_files)
 {
+    // i need to fix this one day
+    cfg.reverse_files = realloc(cfg.reverse_files, cfg.forward_file_count * sizeof(char *));
+
     // Process the first file
     if (access(first_file, R_OK) == 0)
     {
@@ -740,14 +737,21 @@ void fastq_to_fasta(char (*fastq_record)[4][MAX_LINE_LENGTH], char *fasta_output
 ////////////////////////////////////////////////////////////////
 ////////////////HASH TABLE FUNCTIONS ///////////////////////////
 ////////////////////////////////////////////////////////////////
+void destroy_hash_table(hash_table_t *ht)
+{
+    if (ht && ht->entries)
+    {
+        free(ht->entries);
+        ht->entries = NULL;
+    }
+}
 
 void init_hash_table(hash_table_t *ht)
 {
-    // this shouldn't happen but just in case we copy the for loop in the wrong place (again)
-    if (ht && ht->entries)
+    if (ht && ht->entries && ht->used > 0)
     {
-        printf("hash table with entries found (shouldn't happen) attempting to free hash table\n");
-        free(ht->entries);
+        printf("Existing hash table with %zu entries found (shouldn't happen)\n", ht->used);
+        exit(EXIT_FAILURE);
     }
 
     ht->entries = calloc(cfg.initial_hash_size, sizeof(kmer_t));
@@ -1062,12 +1066,13 @@ void calculate_thread_positions(char *data, size_t total_file_size, int thread_c
 // a different and better approach would be to submit a thread for X records rather than parse the file and split across. another day
 void calculate_thread_positions_from_records(char *data, size_t total_file_size, int thread_count, size_t **thread_starts, size_t **thread_ends, size_t records)
 {
+
     size_t records_per_thread = records / thread_count; // last thread will have a bit more
 
     if (thread_count < 2 || records_per_thread < 1 || total_file_size < 1)
         return;
 
-    size_t max_lines = cfg.is_input_fastq == true ? records_per_thread * 4 : records_per_thread * 2;
+    int max_lines = cfg.is_input_fastq == true ? records_per_thread * 4 : records_per_thread * 2;
 
     // thread 0 is 0
     (*thread_starts)[0] = 0;
@@ -1116,6 +1121,56 @@ size_t count_records_seqfile(char *data, size_t size)
         return line_count / 2;
 }
 
+void seed_kmer_hash(char *file, int records_to_seed, hash_table_t *ht, int K, int depth_per_cpu)
+{
+    if (cfg.verbose)
+        printf("Seeding hash table with up to %'d records\n", records_to_seed);
+
+    mmap_file_t mmapped = mmap_file(file);
+
+    int lines_to_read = cfg.is_input_fastq == true ? 4 : 2;
+    int record_count = 0, line_count = 0;
+    char record[lines_to_read][MAX_LINE_LENGTH];
+    size_t char_index = 0;
+
+    for (size_t character = 0; character < mmapped.size; ++character)
+    {
+        record[line_count][char_index++] = mmapped.data[character];
+
+        if (mmapped.data[character] == '\n')
+        {
+            record[line_count][char_index] = '\0';
+            char_index = 0;
+            line_count++;
+
+            if (line_count == lines_to_read)
+            {
+                int seq_high_count_kmers = 0;
+                int total_seq_kmers = 0;
+                if (strlen(record[1]) > K)
+                {
+                    sequence_to_hash(record[1], ht, &seq_high_count_kmers, &total_seq_kmers, K, depth_per_cpu);
+                    record_count++;
+                    if (record_count == records_to_seed)
+                    {
+                        if (cfg.verbose)
+                            printf("%'d records with %'zu kmers seeded\n", record_count, ht->used);
+                        munmap_file(&mmapped);
+                        return;
+                    }
+                }
+                line_count = 0;
+                for (int i = 0; i < lines_to_read; ++i)
+                    record[i][0] = '\0';
+            }
+        }
+    }
+    munmap_file(&mmapped);
+    if (cfg.verbose)
+        printf("%'d records with %'zu kmers seeded\n", record_count, ht->used);
+    return;
+}
+
 // size_t get_position_from_sequence_record(char *data, size_t size, size_t record_number)
 // {
 //     size_t line_number = 0;
@@ -1145,8 +1200,27 @@ size_t count_records_seqfile(char *data, size_t size)
 //     exit(EXIT_FAILURE);
 //     return (size_t)-1;
 // }
+bool is_valid_sequence_single(const char *fwd_seq, int K)
+{
+    replacestr(fwd_seq, "N", "A");
+    int fwd_seq_len = strlen(fwd_seq);
+    if (fwd_seq_len < K)
+    {
+        // if (cfg.debug > 1)
+        //     printf("Thread %d - Sequence FWD skipped due to length shorter than K\n%s\n\n", thread_id, fwd_seq);
 
-bool is_valid_sequence_pair(const char *fwd_seq, const char *rev_seq, int thread_id, int K)
+        return false;
+    }
+
+    if (valid_dna(fwd_seq) == false)
+    {
+        fprintf(stderr, "FATAL: FWD sequence does not appear to be a DNA sequence\n%s\n\n", fwd_seq);
+        exit(EXIT_FAILURE);
+    }
+
+    return true;
+}
+bool is_valid_sequence_pair(const char *fwd_seq, const char *rev_seq, int K)
 {
     replacestr(fwd_seq, "N", "A");
     replacestr(rev_seq, "N", "A");
@@ -1169,30 +1243,27 @@ bool is_valid_sequence_pair(const char *fwd_seq, const char *rev_seq, int thread
 
     if (valid_dna(fwd_seq) == false)
     {
-        fprintf(stderr, "FATAL: Thread %d - FWD sequence does not appear to be a DNA sequence\n%s\n\n", thread_id, fwd_seq);
+        fprintf(stderr, "FATAL: FWD sequence does not appear to be a DNA sequence\n%s\n\n", fwd_seq);
         exit(EXIT_FAILURE);
     }
     if (valid_dna(rev_seq) == false)
     {
-        fprintf(stderr, "FATAL: Thread %d - REV sequence does not appear to be a DNA sequence\n%s\n\n", thread_id, rev_seq);
+        fprintf(stderr, "FATAL: REV sequence does not appear to be a DNA sequence\n%s\n\n", rev_seq);
         exit(EXIT_FAILURE);
     }
 
     return true;
 }
 
-bool process_sequence_pair(const char *fwd_seq, const char *rev_seq, hash_table_t *hash_table, int *fwd_seq_high_count_kmers, int *fwd_total_seq_kmers, int *rev_seq_high_count_kmers, int *rev_total_seq_kmers, int thread_id, int K, int depth_per_cpu)
+void sequence_to_hash(const char *seq, hash_table_t *hash_table, int *seq_high_count_kmers, int *total_seq_kmers, int K, int depth_per_cpu)
 {
-    if (is_valid_sequence_pair(fwd_seq, rev_seq, thread_id, K) == false)
-        return false;
+    // if (cfg.debug > 3)
+    // printf("Kmerising Sequence %s\n", seq);
 
-    *fwd_seq_high_count_kmers = 0;
-    *fwd_total_seq_kmers = 0;
-
-    for (int i = 0; i <= strlen(fwd_seq) - K; i++)
+    for (int i = 0; i <= strlen(seq) - K; i++)
     {
         char kmer[K + 1];
-        strncpy(kmer, fwd_seq + i, K);
+        strncpy(kmer, seq + i, K);
         kmer[K] = '\0';
 
         uint64_t hash = 0;
@@ -1211,61 +1282,50 @@ bool process_sequence_pair(const char *fwd_seq, const char *rev_seq, hash_table_
         if (hash == 0)
             continue;
 
-        (*fwd_total_seq_kmers)++;
-        size_t index = store_kmer(hash_table, hash, thread_id);
+        (*total_seq_kmers)++;
+        size_t index = store_kmer(hash_table, hash, 0);
 
         if (index < 0)
         {
-            fprintf(stderr, "ERROR3: Thread %d - This shouldnt have happened, index %zu hash %zu capacity %zu\n", thread_id, index, hash, hash_table->capacity);
+            fprintf(stderr, "ERROR3: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
             exit(EXIT_FAILURE);
         }
         if (hash_table->entries[index].count >= depth_per_cpu)
         {
-            (*fwd_seq_high_count_kmers)++;
+            (*seq_high_count_kmers)++;
         }
     }
+}
+bool process_sequence_single(const char *fwd_seq, hash_table_t *hash_table, int *fwd_seq_high_count_kmers,
+                             int *fwd_total_seq_kmers, int thread_id, int K, int depth_per_cpu)
+{
+    if (is_valid_sequence_single(fwd_seq, K) == false)
+        return false;
+
+    *fwd_seq_high_count_kmers = 0;
+    *fwd_total_seq_kmers = 0;
+    sequence_to_hash(fwd_seq, hash_table, fwd_seq_high_count_kmers, fwd_total_seq_kmers, K, depth_per_cpu);
+
+    return true;
+}
+bool process_sequence_pair(const char *fwd_seq, const char *rev_seq, hash_table_t *hash_table, int *fwd_seq_high_count_kmers,
+                           int *fwd_total_seq_kmers, int *rev_seq_high_count_kmers, int *rev_total_seq_kmers, int thread_id, int K, int depth_per_cpu)
+{
+    if (is_valid_sequence_pair(fwd_seq, rev_seq, K) == false)
+        return false;
+
+    *fwd_seq_high_count_kmers = 0;
+    *fwd_total_seq_kmers = 0;
+    sequence_to_hash(fwd_seq, hash_table, fwd_seq_high_count_kmers, fwd_total_seq_kmers, K, depth_per_cpu);
 
     *rev_seq_high_count_kmers = 0;
     *rev_total_seq_kmers = 0;
-    for (int i = 0; i <= strlen(rev_seq) - K; i++)
-    {
-        char kmer[K + 1];
-        strncpy(kmer, rev_seq + i, K);
-        kmer[K] = '\0';
+    sequence_to_hash(rev_seq, hash_table, rev_seq_high_count_kmers, rev_total_seq_kmers, K, depth_per_cpu);
 
-        uint64_t hash = 0;
-
-        if (cfg.canonical == 1)
-        {
-            const char *canonical_kmer = get_canonical_kmer(kmer, K);
-            hash = encode_kmer_plain(canonical_kmer, K);
-        }
-        else
-        {
-            hash = encode_kmer_plain(kmer, K);
-        }
-
-        // this actually means hashing failed so it shouldn't occur.
-        if (hash == 0)
-            continue;
-
-        (*rev_total_seq_kmers)++;
-        size_t index = store_kmer(hash_table, hash, thread_id);
-
-        if (index < 0)
-        {
-            fprintf(stderr, "ERROR3: Thread %d - This shouldnt have happened, index %zu hash %zu capacity %zu\n", thread_id, index, hash, hash_table->capacity);
-            exit(EXIT_FAILURE);
-        }
-        if (hash_table->entries[index].count >= depth_per_cpu)
-        {
-            (*rev_seq_high_count_kmers)++;
-        }
-    }
     return true;
 }
 
-void *process_thread_chunk(void *arg)
+void *process_thread_chunk_paired(void *arg)
 {
     thread_data_t *data = (thread_data_t *)arg;
     // generic
@@ -1278,6 +1338,8 @@ void *process_thread_chunk(void *arg)
     int K = cfg.ksize;
     int depth_per_cpu = cfg.depth_per_cpu;
     int debug = cfg.debug;
+    int verbose = cfg.verbose;
+    int singleend = cfg.singleend;
     bool is_input_fastq = cfg.is_input_fastq;
     bool is_output_fastq = cfg.is_output_fastq;
     float coverage = cfg.coverage;
@@ -1296,7 +1358,7 @@ void *process_thread_chunk(void *arg)
     data->last_report_time = current_time;
     data->last_report_count = data->processed_count;
 
-    if (cfg.verbose)
+    if (cfg.debug)
         printf("Thread %d started; processing %d lines per record\n", thread_id, lines_to_read);
 
     // all checks in here may slow down things
@@ -1326,49 +1388,25 @@ void *process_thread_chunk(void *arg)
         if (!valid_record)
             break;
 
-        // if (debug > 2)
-        // {
-        //     printf("DEBUG: Thread %d - Processing sequence pair %'zu\n", thread_id, data->processed_count);
-        //     printf("DEBUG: Forward sequence: %.50s...\n", forward_record[1]);
-        //     printf("DEBUG: Reverse sequence: %.50s...\n", reverse_record[1]);
-        // }
-
-        ////////////////////////////////////////////////////////////////////
-        // TODO we should have a user option to turn off these sanity checks.
-        // tests showed it went from 25k to 32k seqs per second
-        ////////////////////////////////////////////////////////////////////
-        // int forward_seq_len = strlen(forward_record[1]);
-        // int reverse_seq_len = strlen(reverse_record[1]);
-        // if (lines_to_read == 4 && forward_seq_len != strlen(forward_record[3]))
-        // {
-        //     printf("ERROR! Thread %d - fwd sequence line and quality line are not the same size\n1:\t%s\n2:\t%s\n3:\t%s\n4:\t%s\n\n", thread_id, forward_record[0], forward_record[1], forward_record[2], forward_record[3]);
-        //     exit(EXIT_FAILURE);
-        // }
-        // if (lines_to_read == 4 && reverse_seq_len != strlen(reverse_record[3]))
-        // {
-        //     printf("ERROR! Thread %d - rev sequence line and quality line are not the same size\n1:\t%s\n2:\t%s\n3:\t%s\n4:\t%s\n\n", thread_id, reverse_record[0], reverse_record[1], reverse_record[2], reverse_record[3]);
-        //     exit(EXIT_FAILURE);
-        // }
-
-        ////////////////////////////////////////////////////////////////////
-        ////////////////////////////////////////////////////////////////////
-        ////////////////////////////////////////////////////////////////////
-
-        // this function already checks if seq is less than k but it doesn't check if both sequences are.
-        // todo: change sequence to make only a single call, fwd and reverse, return boolean to use for skipping.
         bool process_success = process_sequence_pair(forward_record[1], reverse_record[1], local_hash_table, &seq_high_count_kmers_forward, &total_seq_kmers_forward, &seq_high_count_kmers_reverse, &total_seq_kmers_reverse, thread_id, K, depth_per_cpu);
-        // process_sequence(reverse_record[1], local_hash_table, cfg.ksize, cfg.depth_per_cpu, &seq_high_count_kmers_reverse, &total_seq_kmers_reverse, thread_id);
         if (process_success == false)
             continue;
 
         data->processed_count++;
 
-        int seq_high_count_kmers = seq_high_count_kmers_forward + seq_high_count_kmers_reverse;
-        int total_seq_kmers = total_seq_kmers_forward + total_seq_kmers_reverse;
-        float high_count_ratio = total_seq_kmers > 0 ? (float)seq_high_count_kmers / total_seq_kmers : 0;
+        // note, we process and filter pairs; it's the average redundancy in the pair not each sequence.
+        // i think this is appropriate but it could be replaced with an AND clause (but not an OR clause)
+
+        // int seq_high_count_kmers_pair = seq_high_count_kmers_forward + seq_high_count_kmers_reverse;
+        // int total_seq_kmers_pair = total_seq_kmers_forward + total_seq_kmers_reverse;
+        // float high_count_ratio_pair = total_seq_kmers_pair > 0 ? (float)seq_high_count_kmers_pair / total_seq_kmers_pair : 0;
+        float high_count_ratio_fwd = total_seq_kmers_forward > 0 ? (float)seq_high_count_kmers_forward / total_seq_kmers_forward : 0;
+        float high_count_ratio_rev = total_seq_kmers_reverse > 0 ? (float)seq_high_count_kmers_reverse / total_seq_kmers_reverse : 0;
 
         bool is_printed = false;
-        if (high_count_ratio <= coverage)
+        // options
+        if (high_count_ratio_fwd <= coverage && high_count_ratio_rev <= coverage)
+        // if (high_count_ratio_pair <= coverage) // this skips fewer sequences, which is a tad surprising.
         {
             if (is_input_fastq == true && is_output_fastq == false)
             {
@@ -1409,13 +1447,11 @@ void *process_thread_chunk(void *arg)
             {
                 printf("Thread %d - Sequence pair %'zu SKIPPED: ", thread_id, data->processed_count);
             }
-            printf("High (%d) count kmers: F:%d;R:%d;B:%d, Total unique kmers: F:%d;R:%d;B:%d, High (%d) count ratio: %.2f\n",
+            printf("High (%d) count kmers: F:%d;R:%d, Total unique kmers: F:%d;R:%d High count ratio: F:%.2f;R:%.2f\n",
                    depth_per_cpu,
-                   seq_high_count_kmers_forward,
-                   seq_high_count_kmers_reverse, seq_high_count_kmers,
-                   total_seq_kmers_forward, total_seq_kmers_reverse, total_seq_kmers,
-                   depth_per_cpu,
-                   high_count_ratio);
+                   seq_high_count_kmers_forward, seq_high_count_kmers_reverse,
+                   total_seq_kmers_forward, total_seq_kmers_reverse,
+                   high_count_ratio_fwd, high_count_ratio_rev);
         }
         sequences_processed++;
 
@@ -1434,14 +1470,16 @@ void *process_thread_chunk(void *arg)
             float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
             float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
             float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
-            printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences/s, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Unique kmers (all sequences; this thread): %'zu (%+.2f%%)\n",
-                   thread_id, rate, prev_rate_improvement * 100,
-                   data->processed_count,
-                   data->printed_count,
-                   printed_improvement * 100,
-                   data->skipped_count,
-                   skipped_improvement * 100,
-                   total_kmers, kmer_improvement * 100);
+
+            if (verbose)
+                printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences/s, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Unique kmers (all sequences; this thread): %'zu (%+.2f%%)\n",
+                       thread_id, rate, prev_rate_improvement * 100,
+                       data->processed_count,
+                       data->printed_count,
+                       printed_improvement * 100,
+                       data->skipped_count,
+                       skipped_improvement * 100,
+                       total_kmers, kmer_improvement * 100);
 
             prev_total_kmers = total_kmers;
             prev_printed_count = data->printed_count;
@@ -1455,7 +1493,7 @@ void *process_thread_chunk(void *arg)
 
     // chunk finished processing
 
-    if (cfg.verbose)
+    if (verbose)
         printf("Thread %d: completed processing file\n", thread_id);
 
     current_time = time(NULL);
@@ -1467,6 +1505,7 @@ void *process_thread_chunk(void *arg)
     float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
     float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
     float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
+
     printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences/s, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Unique kmers (all sequences; this thread): %'zu (%+.2f%%)\n",
            thread_id, rate, prev_rate_improvement * 100,
            data->processed_count,
@@ -1487,9 +1526,10 @@ void *process_thread_chunk(void *arg)
     return NULL;
 }
 
-int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap)
+int multithreaded_process_files_paired(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap)
 {
     char stop_char = cfg.is_input_fastq == false ? '>' : '@';
+
     size_t max_total_kmers_in_threads = 0;
     pthread_t threads[cfg.cpus];
 
@@ -1532,7 +1572,8 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
         else
         {
             if (cfg.verbose)
-                printf("The forward and reverse files have different file size, so calculating split amongst threads is slower, hold on...\n");
+                printf("The forward (%'zu) and reverse files (%'zu) have different file size, so calculating split amongst threads is slower, hold on...\n",
+                       forward_mmap->size, reverse_mmap->size);
 
             size_t total_records = 0;
             total_records = count_records_seqfile(forward_mmap->data, forward_mmap->size);
@@ -1545,10 +1586,10 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
 
             for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
             {
-                if (cfg.debug > 2)
+                if (cfg.debug > 0)
                 {
-                    printf("fwd record starts at %'zu (%c) and ends at %'zu (newline after %c)\n", forward_thread_starts[thread_number], forward_mmap->data[forward_thread_starts[thread_number]], forward_thread_ends[thread_number], forward_mmap->data[forward_thread_ends[thread_number] - 1]);
-                    printf("rev record starts at %'zu (%c) and ends at %'zu (newline after %c)\n", reverse_thread_starts[thread_number], reverse_mmap->data[reverse_thread_starts[thread_number]], reverse_thread_ends[thread_number], reverse_mmap->data[reverse_thread_ends[thread_number] - 1]);
+                    printf("Thread %d: fwd record starts at %'zu (%c) and ends at %'zu (newline after %c)\n", thread_number, forward_thread_starts[thread_number], forward_mmap->data[forward_thread_starts[thread_number]], forward_thread_ends[thread_number], forward_mmap->data[forward_thread_ends[thread_number] - 1]);
+                    printf("Thread %d: rev record starts at %'zu (%c) and ends at %'zu (newline after %c)\n", thread_number, reverse_thread_starts[thread_number], reverse_mmap->data[reverse_thread_starts[thread_number]], reverse_thread_ends[thread_number], reverse_mmap->data[reverse_thread_ends[thread_number] - 1]);
                 }
             }
         }
@@ -1576,7 +1617,7 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
         if (cfg.debug > 1)
             printf("Starting thread %d\n", thread_number);
 
-        if (pthread_create(&threads[thread_number], NULL, process_thread_chunk, &thread_data[thread_number]) != 0)
+        if (pthread_create(&threads[thread_number], NULL, process_thread_chunk_paired, &thread_data[thread_number]) != 0)
         {
 
             fprintf(stderr, "Error creating thread %d\n", thread_number);
@@ -1624,13 +1665,309 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
     reporting.files_processed++;
     reporting.max_total_kmers = (reporting.max_total_kmers < max_total_kmers_in_threads) ? max_total_kmers_in_threads : reporting.max_total_kmers;
 
-    printf("File's statistics: Processed %'zu, Printed %'zu, Skipped %'zu, Max Unique Kmers in a thread: %'zu\n",
+    printf("Cumulative file statistics: Processed %'zu, Printed %'zu, Skipped %'zu, Cumulative Max Unique Kmers in a thread: %'zu\n",
            total_processed, total_printed, total_skipped, max_total_kmers_in_threads);
 
     free(forward_thread_starts);
     free(forward_thread_ends);
     free(reverse_thread_starts);
     free(reverse_thread_ends);
+
+    return 0;
+}
+void *process_thread_chunk_single(void *arg)
+{
+    thread_data_t *data = (thread_data_t *)arg;
+    // generic
+    int lines_to_read = cfg.is_input_fastq == true ? 4 : 2;
+    hash_table_t *local_hash_table = data->hash_table;
+    int thread_id = data->thread_id;
+    FILE *output_forward = data->thread_output_forward;
+    // so we don't keep accessing it.
+    int K = cfg.ksize;
+    int depth_per_cpu = cfg.depth_per_cpu;
+    int debug = cfg.debug;
+    int verbose = cfg.verbose;
+    bool is_input_fastq = cfg.is_input_fastq;
+    bool is_output_fastq = cfg.is_output_fastq;
+    float coverage = cfg.coverage;
+
+    // input file
+    char *forward_pointer = data->forward_data + data->forward_file_start;
+
+    // thread stats
+    size_t total_kmers = data->hash_table->used;
+    int processed_count = 0, printed_count = 0, skipped_count = 0, prev_printed_count = data->printed_count, prev_skipped_count = data->skipped_count;
+    size_t prev_total_kmers = total_kmers, sequences_last_processed = data->processed_count;
+    double prev_rate = 0;
+    size_t sequences_processed = 0;
+    time_t current_time = time(NULL);
+    data->last_report_time = current_time;
+    data->last_report_count = data->processed_count;
+
+    if (cfg.debug)
+        printf("Thread %d started; processing %d lines per record\n", thread_id, lines_to_read);
+
+    // all checks in here may slow down things
+    while (forward_pointer < data->forward_data + data->forward_file_end)
+    {
+
+        bool valid_record = true;
+        int seq_high_count_kmers_forward = 0, total_seq_kmers_forward = 0;
+
+        char forward_record[lines_to_read][MAX_LINE_LENGTH], reverse_record[lines_to_read][MAX_LINE_LENGTH];
+
+        // read pair
+        for (int i = 0; i < lines_to_read; i++)
+        {
+            // store data into record, update pointer
+            forward_pointer = read_line(forward_pointer, forward_record[i], MAX_LINE_LENGTH);
+
+            if (!forward_pointer)
+            {
+                valid_record = false;
+                break;
+            }
+        }
+        if (!valid_record)
+            break;
+        bool process_success = process_sequence_single(forward_record[1], local_hash_table, &seq_high_count_kmers_forward, &total_seq_kmers_forward, thread_id, K, depth_per_cpu);
+        if (process_success == false)
+            continue;
+
+        data->processed_count++;
+
+        // note, we process and filter pairs; it's the average redundancy in the pair not each sequence.
+        // i think this is appropriate but it could be replaced with an AND clause (but not an OR clause)
+
+        // int seq_high_count_kmers_pair = seq_high_count_kmers_forward + seq_high_count_kmers_reverse;
+        // int total_seq_kmers_pair = total_seq_kmers_forward + total_seq_kmers_reverse;
+        // float high_count_ratio_pair = total_seq_kmers_pair > 0 ? (float)seq_high_count_kmers_pair / total_seq_kmers_pair : 0;
+        float high_count_ratio_fwd = total_seq_kmers_forward > 0 ? (float)seq_high_count_kmers_forward / total_seq_kmers_forward : 0;
+
+        bool is_printed = false;
+        // options
+        if (high_count_ratio_fwd <= coverage)
+        // if (high_count_ratio_pair <= coverage) // this skips fewer sequences, which is a tad surprising.
+        {
+            if (is_input_fastq == true && is_output_fastq == false)
+            {
+                char forward_record_fasta[MAX_LINE_LENGTH * 2] = {0};
+                fastq_to_fasta(&forward_record, forward_record_fasta, true);
+
+                char reverse_record_fasta[MAX_LINE_LENGTH * 2] = {0};
+                fastq_to_fasta(&reverse_record, reverse_record_fasta, false);
+                fprintf(output_forward, "%s", forward_record_fasta);
+            }
+            else
+            {
+                for (int i = 0; i < lines_to_read; i++)
+                {
+                    fprintf(output_forward, "%s\n", forward_record[i]);
+                }
+            }
+            data->printed_count++;
+            is_printed = true;
+        }
+        else
+        {
+            data->skipped_count++;
+            is_printed = false;
+        }
+
+        // debug report (this check isn't a massive hit)
+        if (debug > 1)
+        {
+
+            if (is_printed == true)
+            {
+                printf("Thread %d - Sequence pair %'zu PRINTED: ", thread_id, data->processed_count);
+            }
+            else
+            {
+                printf("Thread %d - Sequence pair %'zu SKIPPED: ", thread_id, data->processed_count);
+            }
+            printf("High (%d) count kmers: F:%d, Total unique kmers: F:%d High count ratio: F:%.2f\n",
+                   depth_per_cpu,
+                   seq_high_count_kmers_forward,
+                   total_seq_kmers_forward,
+                   high_count_ratio_fwd);
+        }
+        sequences_processed++;
+
+        current_time = time(NULL);
+        if (difftime(current_time, data->last_report_time) >= REPORTING_INTERVAL)
+        {
+            if (debug > 1)
+                printf("reporting after %d seconds\n", REPORTING_INTERVAL);
+
+            double elapsed_time = difftime(current_time, data->last_report_time);
+            sequences_last_processed = data->processed_count - data->last_report_count;
+            double rate = sequences_last_processed / elapsed_time;
+            total_kmers = local_hash_table->used;
+
+            float printed_improvement = (prev_printed_count == 0) ? 0 : (float)(data->printed_count - prev_printed_count) / prev_printed_count;
+            float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
+            float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
+            float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
+
+            if (verbose)
+                printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences/s, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Unique kmers (all sequences; this thread): %'zu (%+.2f%%)\n",
+                       thread_id, rate, prev_rate_improvement * 100,
+                       data->processed_count,
+                       data->printed_count,
+                       printed_improvement * 100,
+                       data->skipped_count,
+                       skipped_improvement * 100,
+                       total_kmers, kmer_improvement * 100);
+
+            prev_total_kmers = total_kmers;
+            prev_printed_count = data->printed_count;
+            prev_skipped_count = data->skipped_count;
+            prev_rate = rate;
+
+            data->last_report_time = current_time;
+            data->last_report_count = data->processed_count;
+        }
+    }
+
+    // chunk finished processing
+
+    if (verbose)
+        printf("Thread %d: completed processing file\n", thread_id);
+
+    current_time = time(NULL);
+    double elapsed_time = difftime(current_time, data->last_report_time);
+    sequences_processed = data->processed_count - data->last_report_count;
+    double rate = sequences_processed / elapsed_time;
+    total_kmers = local_hash_table->used;
+    float printed_improvement = (prev_printed_count == 0) ? 0 : (float)(data->printed_count - prev_printed_count) / prev_printed_count;
+    float skipped_improvement = (prev_skipped_count == 0) ? 0 : (float)(data->skipped_count - prev_skipped_count) / prev_skipped_count;
+    float prev_rate_improvement = (prev_rate == 0) ? 0 : (float)(rate - prev_rate) / prev_rate;
+    float kmer_improvement = (prev_total_kmers == 0) ? 0 : (float)(total_kmers - prev_total_kmers) / prev_total_kmers;
+
+    printf("Thread %d - Processing rate: %'.0f (%+.2f%%) sequences/s, processed %'zu pairs, printed: %'zu (%+.2f%%), skipped: %'zu (%+.2f%%), Unique kmers (all sequences; this thread): %'zu (%+.2f%%)\n",
+           thread_id, rate, prev_rate_improvement * 100,
+           data->processed_count,
+           data->printed_count,
+           printed_improvement * 100,
+           data->skipped_count,
+           skipped_improvement * 100,
+           total_kmers, kmer_improvement * 100);
+
+    prev_total_kmers = total_kmers;
+    prev_printed_count = data->printed_count;
+    prev_skipped_count = data->skipped_count;
+    prev_rate = rate;
+
+    data->last_report_time = current_time;
+    data->last_report_count = data->processed_count;
+
+    return NULL;
+}
+
+int multithreaded_process_files_single(thread_data_t *thread_data, mmap_file_t *forward_mmap)
+{
+    char stop_char = cfg.is_input_fastq == false ? '>' : '@';
+
+    size_t max_total_kmers_in_threads = 0;
+    pthread_t threads[cfg.cpus];
+
+    // let's get start and ends for the mmapped file.
+    size_t *forward_thread_starts = NULL;
+    size_t *forward_thread_ends = NULL;
+    forward_thread_starts = calloc(cfg.cpus, sizeof(size_t));
+    forward_thread_ends = calloc(cfg.cpus, sizeof(size_t));
+
+    if (!forward_thread_starts || !forward_thread_ends)
+    {
+        perror("Error allocating memory for thread positions");
+        exit(EXIT_FAILURE);
+    }
+
+    // todo: bug, nb this will not work because forward and reverse can have different file sizes.
+    if (cfg.cpus == 1)
+    {
+        if (cfg.verbose)
+            printf("Single thread mode\n");
+
+        forward_thread_ends[0] = forward_mmap->size - 1;
+    }
+    else
+    {
+        calculate_thread_positions(forward_mmap->data, forward_mmap->size, cfg.cpus, &forward_thread_starts, &forward_thread_ends);
+    }
+
+    for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
+    {
+
+        // store memory mapped file starts and stops, and data structure.
+        thread_data[thread_number].forward_file_start = forward_thread_starts[thread_number];
+        thread_data[thread_number].forward_file_end = forward_thread_ends[thread_number];
+        thread_data[thread_number].forward_data = forward_mmap->data;
+
+        if (!thread_data[thread_number].thread_output_forward || !thread_data[thread_number].thread_output_reverse)
+        {
+            fprintf(stderr, "Error opening thread-specific output files for thread %d, %s and %s\n", thread_number, thread_data[thread_number].thread_output_forward_filename, thread_data[thread_number].thread_output_reverse_filename);
+            exit(EXIT_FAILURE);
+        }
+
+        // printf("forward/reverse size %zu/%zu chunk %s/%s\n", thread_data[i].forward_size, thread_data[i].reverse_size, forward_chunk_end, reverse_chunk_end);
+
+        if (cfg.debug > 1)
+            printf("Starting thread %d\n", thread_number);
+
+        if (pthread_create(&threads[thread_number], NULL, process_thread_chunk_single, &thread_data[thread_number]) != 0)
+        {
+
+            fprintf(stderr, "Error creating thread %d\n", thread_number);
+            for (int j = 0; j < thread_number; j++)
+            {
+                pthread_cancel(threads[j]);
+                pthread_join(threads[j], NULL);
+            }
+            free(forward_thread_starts);
+            free(forward_thread_ends);
+
+            return 1;
+        }
+
+        sleep(1);
+    }
+
+    // close
+    for (int i = 0; i < cfg.cpus; i++)
+    {
+        if (pthread_join(threads[i], NULL) != 0)
+        {
+            fprintf(stderr, "Error joining thread %d\n", i);
+            free(forward_thread_starts);
+            free(forward_thread_ends);
+
+            return 1;
+        }
+    }
+
+    // final report
+    size_t total_processed = 0, total_printed = 0, total_skipped = 0;
+    for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
+    {
+        total_processed += thread_data[thread_number].processed_count;
+        total_printed += thread_data[thread_number].printed_count;
+        total_skipped += thread_data[thread_number].skipped_count;
+        max_total_kmers_in_threads = (max_total_kmers_in_threads < thread_data[thread_number].hash_table->used) ? thread_data[thread_number].hash_table->used : max_total_kmers_in_threads;
+    }
+    reporting.total_processed = total_processed;
+    reporting.total_printed = total_printed;
+    reporting.total_skipped = total_skipped;
+    reporting.files_processed++;
+    reporting.max_total_kmers = (reporting.max_total_kmers < max_total_kmers_in_threads) ? max_total_kmers_in_threads : reporting.max_total_kmers;
+
+    printf("Cumulative file statistics: Processed %'zu, Printed %'zu, Skipped %'zu, Cumulative Max Unique Kmers in a thread: %'zu\n",
+           total_processed, total_printed, total_skipped, max_total_kmers_in_threads);
+
+    free(forward_thread_starts);
+    free(forward_thread_ends);
 
     return 0;
 }
@@ -1655,7 +1992,18 @@ int main(int argc, char *argv[])
         print_usage();
         return 1;
     }
+    hash_table_t seed_hash = {0};
 
+    init_hash_table(&seed_hash);
+    int records_to_seed = 1 + (SEED_NUMBER / cfg.forward_file_count);
+
+    for (int file_index = 0; file_index < cfg.forward_file_count; file_index++)
+    {
+        seed_kmer_hash(cfg.forward_files[file_index], records_to_seed, &seed_hash, cfg.ksize, cfg.depth);
+
+        if (file_index < cfg.reverse_file_count)
+            seed_kmer_hash(cfg.reverse_files[file_index], records_to_seed, &seed_hash, cfg.ksize, cfg.depth);
+    }
     thread_data_t thread_data[cfg.cpus];
 
     // need a for loop for any data that will stay between runs
@@ -1672,72 +2020,143 @@ int main(int argc, char *argv[])
         // for (int i=0;i<NUM_PARTITIONS;i++){ init_hash_table(&global_hash_tables[i]); }
         // etc
 
-        thread_data[thread_number].hash_table = malloc(sizeof(hash_table_t));
-        memset(thread_data[thread_number].hash_table, 0, sizeof(hash_table_t));
+        // thread_data[thread_number].hash_table = malloc(sizeof(hash_table_t));
+        // memset(thread_data[thread_number].hash_table, 0, sizeof(hash_table_t));
+        // if (!thread_data[thread_number].hash_table)
+        // {
+        //     fprintf(stderr, "Thread %d: Memory allocation failed for hash table\n", thread_number);
+        //     exit(EXIT_FAILURE);
+        // }
 
-        if (!thread_data[thread_number].hash_table)
-        {
-            fprintf(stderr, "Thread %d: Memory allocation failed for hash table\n", thread_number);
-            exit(EXIT_FAILURE);
-        }
-        init_hash_table(thread_data[thread_number].hash_table);
+        // init_hash_table(thread_data[thread_number].hash_table);
+        thread_data[thread_number].hash_table = copy_hash_table(&seed_hash);
 
         // initialise the output files for each thread (otherwise we'd need to open as append)
         // every thread prints to its own file
         thread_data[thread_number].thread_output_forward_filename = NULL;
         thread_data[thread_number].thread_output_reverse_filename = NULL;
-        thread_data[thread_number].thread_output_forward_filename = create_output_filename("output_forward", cfg.ksize, cfg.depth_per_cpu, thread_number);
-        thread_data[thread_number].thread_output_reverse_filename = create_output_filename("output_reverse", cfg.ksize, cfg.depth_per_cpu, thread_number);
 
+        thread_data[thread_number].thread_output_forward_filename = create_output_filename("output_forward", cfg.ksize, cfg.depth_per_cpu, thread_number);
         thread_data[thread_number].thread_output_forward = fopen(thread_data[thread_number].thread_output_forward_filename, "w");
         if (!thread_data[thread_number].thread_output_forward)
         {
             fprintf(stderr, "Error opening file to write: %s\n", thread_data[thread_number].thread_output_forward_filename);
             exit(EXIT_FAILURE);
         }
-        thread_data[thread_number].thread_output_reverse = fopen(thread_data[thread_number].thread_output_reverse_filename, "w");
-        if (!thread_data[thread_number].thread_output_reverse)
+
+        if (cfg.reverse_file_count != 0)
         {
-            fprintf(stderr, "Error opening file to write: %s\n", thread_data[thread_number].thread_output_reverse_filename);
-            exit(EXIT_FAILURE);
+            thread_data[thread_number].thread_output_reverse_filename = create_output_filename("output_reverse", cfg.ksize, cfg.depth_per_cpu, thread_number);
+            thread_data[thread_number].thread_output_reverse = fopen(thread_data[thread_number].thread_output_reverse_filename, "w");
+            if (!thread_data[thread_number].thread_output_reverse)
+            {
+                fprintf(stderr, "Error opening file to write: %s\n", thread_data[thread_number].thread_output_reverse_filename);
+                exit(EXIT_FAILURE);
+            }
         }
     }
+    destroy_hash_table(&seed_hash);
 
     // start processing files
     time_t start_time = time(NULL);
 
     for (int file_index = 0; file_index < cfg.forward_file_count; file_index++)
     {
-        printf("Processing file pair %d of %d: %s and %s\n", file_index + 1, cfg.forward_file_count, cfg.forward_files[file_index], cfg.reverse_files[file_index]);
         mmap_file_t forward_mmap = mmap_file(cfg.forward_files[file_index]);
-        mmap_file_t reverse_mmap = mmap_file(cfg.reverse_files[file_index]);
-
-        if (forward_mmap.data == NULL || reverse_mmap.data == NULL)
+        mmap_file_t reverse_mmap;
+        if (file_index < cfg.reverse_file_count)
         {
-            fprintf(stderr, "Error memory mapping input files\n");
-            goto cleanup;
+            printf("Processing file pair %d of %d: %s and %s\n", file_index + 1, cfg.forward_file_count, cfg.forward_files[file_index], cfg.reverse_files[file_index]);
+            reverse_mmap = mmap_file(cfg.reverse_files[file_index]);
+            if (forward_mmap.data == NULL || reverse_mmap.data == NULL)
+            {
+                fprintf(stderr, "Error memory mapping input files\n");
+                goto cleanup;
+            }
+        }
+        else
+        {
+            printf("Processing single-ended file %d of %d: %s\n", file_index + 1, cfg.forward_file_count, cfg.forward_files[file_index]);
+            if (forward_mmap.data == NULL)
+            {
+                fprintf(stderr, "Error memory mapping input files\n");
+                goto cleanup;
+            }
         }
 
-        // passing local copy as was having issues with pointers.
-        if (multithreaded_process_files(thread_data, &forward_mmap, &reverse_mmap) != 0)
+        // we could skip asking user to tell us if inputs are fastq or fasta and just autodetect
+        // output would be determined on whether there is at least one input fasta so would need to loop all files first and open them
+        // ie not here.
+        if (cfg.is_input_fastq == true && forward_mmap.data[0] != '@')
         {
-            fprintf(stderr, "Error processing files\n");
+            fprintf(stderr, "Input FASTQ file %s starts with %c which is not expected\n", cfg.forward_files[file_index], forward_mmap.data[0]);
+            exit(EXIT_FAILURE);
+        }
+        else if (cfg.is_input_fastq == false && forward_mmap.data[0] != '>')
+        {
+            fprintf(stderr, "Input FASTA file %s starts with %c which is not expected\n", cfg.forward_files[file_index], forward_mmap.data[0]);
+            exit(EXIT_FAILURE);
+        }
 
+        if (file_index < cfg.reverse_file_count)
+
+        {
+            if (cfg.is_input_fastq == true && reverse_mmap.data[0] != '@')
+            {
+                fprintf(stderr, "Input FASTQ file %s starts with %c which is not expected\n", cfg.reverse_files[file_index], reverse_mmap.data[0]);
+                exit(EXIT_FAILURE);
+            }
+            else if (cfg.is_input_fastq == false && reverse_mmap.data[0] != '>')
+            {
+                fprintf(stderr, "Input FASTA file %s starts with %c which is not expected\n", cfg.reverse_files[file_index], reverse_mmap.data[0]);
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        if (file_index < cfg.reverse_file_count)
+
+        {
+            if (cfg.debug)
+                printf("launching paired process for file %d\n", file_index);
+            // passing local copy as was having issues with pointers.
+            if (multithreaded_process_files_paired(thread_data, &forward_mmap, &reverse_mmap) != 0)
+            {
+                fprintf(stderr, "Error processing files\n");
+
+                munmap_file(&forward_mmap);
+                munmap_file(&reverse_mmap);
+                goto cleanup;
+            }
             munmap_file(&forward_mmap);
             munmap_file(&reverse_mmap);
-            goto cleanup;
         }
-        munmap_file(&forward_mmap);
-        munmap_file(&reverse_mmap);
+        else
+        {
+            if (cfg.debug)
+                printf("launching single process for file %d\n", file_index);
+            if (multithreaded_process_files_single(thread_data, &forward_mmap) != 0)
+            {
+                fprintf(stderr, "Error processing files\n");
+
+                munmap_file(&forward_mmap);
+                goto cleanup;
+            }
+            munmap_file(&forward_mmap);
+        }
     }
+
+    // destroy_hash_table(&seed_hash);
 
     // closeup and free data used across all files.
     for (int thread_number = 0; thread_number < cfg.cpus; thread_number++)
     {
         fclose(thread_data[thread_number].thread_output_forward);
-        fclose(thread_data[thread_number].thread_output_reverse);
         free(thread_data[thread_number].thread_output_forward_filename);
-        free(thread_data[thread_number].thread_output_reverse_filename);
+        if (cfg.reverse_file_count != 0)
+        {
+            fclose(thread_data[thread_number].thread_output_reverse);
+            free(thread_data[thread_number].thread_output_reverse_filename);
+        }
         free(thread_data[thread_number].hash_table->entries);
         free(thread_data[thread_number].hash_table);
     }
@@ -1746,18 +2165,23 @@ int main(int argc, char *argv[])
     printf("Processed Records: %'zu\n", reporting.total_processed);
     printf("Printed Records: %'zu\n", reporting.total_printed);
     printf("Skipped Records: %'zu\n", reporting.total_skipped);
-    printf("Max unique kmers in any thread: %'zu\n", reporting.max_total_kmers);
+    printf("Cumulative Max unique kmers in any thread: %'zu\n", reporting.max_total_kmers);
     // we can't get this if we have multiple threads unless we merge the tables, is it worth it?
     //    printf("Total unique kmers across all sequences: %'zu\n", reporting.total_kmers);
 
 cleanup:
+
     for (int thread_number = 0; thread_number < cfg.forward_file_count; thread_number++)
     {
         free(cfg.forward_files[thread_number]);
-        free(cfg.reverse_files[thread_number]);
+        if (thread_number < cfg.reverse_file_count)
+        {
+            free(cfg.reverse_files[thread_number]);
+        }
     }
     free(cfg.forward_files);
-    free(cfg.reverse_files);
+    if (cfg.reverse_file_count != 0)
+        free(cfg.reverse_files);
 
     time_t end_time = time(NULL);
     double total_runtime = difftime(end_time, start_time);
@@ -1765,7 +2189,11 @@ cleanup:
     if (reporting.total_processed > 0)
     {
         double processing_rate = reporting.total_processed / total_runtime;
-        printf("Overall processing rate: %'.0f sequences/s\n", processing_rate);
+
+        if (cfg.reverse_file_count != 0)
+            printf("Overall processing rate: %'.0f sequence pairs per second\n", processing_rate);
+        else
+            printf("Overall processing rate: %'.0f sequences per second\n", processing_rate);
     }
     else
     {

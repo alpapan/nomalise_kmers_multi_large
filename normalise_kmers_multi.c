@@ -124,7 +124,7 @@ size_t expand_global_hash_table(size_t new_capacity, int thread_id, bool nolock)
 size_t expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread_id);
 static inline uint64_t encode_kmer_murmur(const char *seq, int k);
 char *create_output_filename(const char *basename, int k, int norm_depth, int thread);
-int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
+int multithreaded_process_files_paired(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
 size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id);
 void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM_DEPTH, int *seq_high_count_kmers, int *total_seq_kmers, int thread_id);
 void print_usage(char *program_name);
@@ -132,7 +132,7 @@ int parse_arguments(int argc, char *argv[]);
 mmap_file_t mmap_file(const char *filename);
 void munmap_file(mmap_file_t *mf);
 void synchronise_hash_tables(hash_table_t *local_ht, int thread_id);
-void *process_thread_chunk(void *arg);
+void *process_thread_chunk_paired(void *arg);
 bool valid_dna(const char *sequence);
 char *read_line(char *ptr, char *buffer, int max_length);
 static void replacestr(const char *line, const char *search, const char *replace);
@@ -965,7 +965,7 @@ bool valid_dna(const char *sequence)
     return true;
 }
 
-void *process_thread_chunk(void *arg)
+void *process_thread_chunk_paired(void *arg)
 {
     thread_data_t *data = (thread_data_t *)arg;
     char *forward_ptr = data->forward_ptr;
@@ -1182,7 +1182,7 @@ void *process_thread_chunk(void *arg)
     return NULL;
 }
 
-int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap)
+int multithreaded_process_files_paired(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap)
 {
     char stop_char = strcmp(cfg.informat, "fa") == 0 ? '>' : '@';
 
@@ -1225,7 +1225,7 @@ int multithreaded_process_files(thread_data_t *thread_data, mmap_file_t *forward
 
         // printf("forward/reverse size %zu/%zu chunk %s/%s\n", thread_data[i].forward_size, thread_data[i].reverse_size, forward_chunk_end, reverse_chunk_end);
 
-        if (pthread_create(&threads[i], NULL, process_thread_chunk, &thread_data[i]) != 0)
+        if (pthread_create(&threads[i], NULL, process_thread_chunk_paired, &thread_data[i]) != 0)
         {
             fprintf(stderr, "Error creating thread %d\n", i);
             for (int j = 0; j < i; j++)
@@ -1496,7 +1496,7 @@ int main(int argc, char *argv[])
         }
 
         // passing local copy as was having issues with pointers.
-        if (multithreaded_process_files(thread_data, &forward_mmap, &reverse_mmap) != 0)
+        if (multithreaded_process_files_paired(thread_data, &forward_mmap, &reverse_mmap) != 0)
         {
             fprintf(stderr, "Error processing files\n");
 	        munmap_file(&forward_mmap);
