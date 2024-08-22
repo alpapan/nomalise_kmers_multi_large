@@ -16,6 +16,9 @@
 // DONE: support single end data
 // 20240822: this has now been done
 
+// TODO: initiate a table sync when there is no consequence on wait time:
+// when the file is being read to decide where to split it amongst the threads
+
 // TODO: provide advice that input data should be adaptor/quality trimmed
 // noting that i haven't tested that (and non-trimmed files will be faster to process
 // due to fwd/rev file sizes/record boundaries being identical).
