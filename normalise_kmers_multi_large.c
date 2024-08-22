@@ -1124,7 +1124,7 @@ size_t count_records_seqfile(char *data, size_t size)
 void seed_kmer_hash(char *file, int records_to_seed, hash_table_t *ht, int K, int depth_per_cpu)
 {
     if (cfg.verbose)
-        printf("Seeding hash table with up to %'d records\n", records_to_seed);
+        printf("Seeding hash table with up to %'d records from file %s\n", records_to_seed, file);
 
     mmap_file_t mmapped = mmap_file(file);
 
