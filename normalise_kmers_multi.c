@@ -40,7 +40,7 @@ typedef struct
 
 typedef struct hash_table_t
 {
-    kmer_t *entries;
+    kmer_t *kmer;
     size_t used;
     size_t capacity;
 } hash_table_t;
@@ -423,8 +423,8 @@ float memoryGB2capacity(size_t memory)
 void init_hash_table(hash_table_t *ht)
 {
     pthread_mutex_lock(&hash_table_mutex);
-    ht->entries = calloc(cfg.initial_hash_size, sizeof(kmer_t));
-    if (!ht->entries)
+    ht->kmer = calloc(cfg.initial_hash_size, sizeof(kmer_t));
+    if (!ht->kmer)
     {
         fprintf(stderr, "Memory allocation failed\n");
         pthread_mutex_unlock(&hash_table_mutex);
@@ -447,15 +447,15 @@ hash_table_t *copy_hash_table(const hash_table_t *source)
     }
     copy->capacity = source->capacity;
     copy->used = source->used;
-    copy->entries = calloc(copy->capacity, sizeof(kmer_t));
-    if (!copy->entries)
+    copy->kmer = calloc(copy->capacity, sizeof(kmer_t));
+    if (!copy->kmer)
     {
         fprintf(stderr, "Memory allocation failed\n");
         free(copy);
         pthread_mutex_unlock(&hash_table_mutex);
         exit(EXIT_FAILURE);
     }
-    memcpy(copy->entries, source->entries, copy->capacity * sizeof(kmer_t));
+    memcpy(copy->kmer, source->kmer, copy->capacity * sizeof(kmer_t));
     pthread_mutex_unlock(&hash_table_mutex);
     return copy;
 }
@@ -463,7 +463,7 @@ bool is_hash_table_empty(const hash_table_t *ht)
 {
     for (size_t i = 0; i < ht->capacity; i++)
     {
-        if (ht->entries[i].hash != 0)
+        if (ht->kmer[i].hash != 0)
         {
             return false;
         }
@@ -503,26 +503,26 @@ size_t expand_global_hash_table(size_t new_capacity, int thread_id, bool nolock)
 
     for (size_t i = 0; i < global_hash_table.capacity; i++)
     {
-        if (global_hash_table.entries[i].hash != 0)
+        if (global_hash_table.kmer[i].hash != 0)
         {
             // kmer is stored at an index based on its capacity so when that increases, indexes change
-            size_t new_index = global_hash_table.entries[i].hash % new_capacity;
-            uint64_t offset = find_hash_offset(global_hash_table.entries[i].hash, new_capacity);
+            size_t new_index = global_hash_table.kmer[i].hash % new_capacity;
+            uint64_t offset = find_hash_offset(global_hash_table.kmer[i].hash, new_capacity);
 
             while (new_entries[new_index].hash != 0)
             {
                 new_index = (new_index + offset) % new_capacity;
             }
-            new_entries[new_index] = global_hash_table.entries[i];
+            new_entries[new_index] = global_hash_table.kmer[i];
 
             new_global_hash_size++;
         }
     }
 
-    if (global_hash_table.entries)
-        free(global_hash_table.entries);
+    if (global_hash_table.kmer)
+        free(global_hash_table.kmer);
 
-    global_hash_table.entries = new_entries;
+    global_hash_table.kmer = new_entries;
     global_hash_table.capacity = new_capacity;
     global_hash_table.used = new_global_hash_size;
 
@@ -564,24 +564,24 @@ size_t expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread
 
     for (size_t i = 0; i < ht->capacity; i++)
     {
-        if (ht->entries[i].hash != 0)
+        if (ht->kmer[i].hash != 0)
         {
             // kmer is stored at an index based on its capacity so when that increases, indexes change
-            size_t new_index = ht->entries[i].hash % new_capacity;
-            uint64_t offset = find_hash_offset(ht->entries[i].hash, new_capacity);
+            size_t new_index = ht->kmer[i].hash % new_capacity;
+            uint64_t offset = find_hash_offset(ht->kmer[i].hash, new_capacity);
             while (new_entries[new_index].hash != 0)
             {
                 new_index = (new_index + offset) % new_capacity;
             }
-            new_entries[new_index] = ht->entries[i];
+            new_entries[new_index] = ht->kmer[i];
             new_hash_size++;
         }
     }
 
-    if (ht->entries)
-        free(ht->entries);
+    if (ht->kmer)
+        free(ht->kmer);
 
-    ht->entries = new_entries;
+    ht->kmer = new_entries;
     ht->capacity = new_capacity;
     ht->used = new_hash_size;
 
@@ -745,7 +745,7 @@ size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
     size_t original_index = index;
     uint64_t offset = find_hash_offset(hash, hash_table->capacity);
 
-    while (hash_table->entries[index].hash != 0 && hash_table->entries[index].hash != hash)
+    while (hash_table->kmer[index].hash != 0 && hash_table->kmer[index].hash != hash)
     {
         index = (index + offset) % hash_table->capacity;
         if (index < 0)
@@ -764,16 +764,16 @@ size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id)
     }
 
     // new kmer inserted, so increase size.
-    if (hash_table->entries[index].hash == 0)
+    if (hash_table->kmer[index].hash == 0)
     {
-        hash_table->entries[index].hash = hash;
-        hash_table->entries[index].count = 0;
+        hash_table->kmer[index].hash = hash;
+        hash_table->kmer[index].count = 0;
         hash_table->used++;
     }
 
-    hash_table->entries[index].count++;
+    hash_table->kmer[index].count++;
 
-    //   printf("DEBUG: Kmer hash: %lu, Count: %d\n", hash, hash_table->entries[index].count);
+    //   printf("DEBUG: Kmer hash: %lu, Count: %d\n", hash, hash_table->kmer[index].count);
     return index;
 }
 
@@ -838,7 +838,7 @@ void process_sequence(const char *seq, hash_table_t *hash_table, int K, int NORM
                 exit(EXIT_FAILURE);
             }
 
-            if (hash_table->entries[index].count >= NORM_DEPTH)
+            if (hash_table->kmer[index].count >= NORM_DEPTH)
             {
                 (*seq_high_count_kmers)++;
             }
@@ -1327,31 +1327,31 @@ void synchronise_hash_tables(hash_table_t *local_ht, int thread_id)
     for (size_t i = 0; i < local_ht->capacity; i++)
     {
         // printf("Thread %d: Checking index %zu\n", thread_id, i);
-        if (local_ht->entries[i].hash != 0)
+        if (local_ht->kmer[i].hash != 0)
         {
             // printf("Thread %d: Kmer found at index %zu\n", thread_id, i);
 
             // index is hash vakue modulo table.it is going to be stored in
-            size_t index = local_ht->entries[i].hash % global_hash_table.capacity;
+            size_t index = local_ht->kmer[i].hash % global_hash_table.capacity;
 
             // it's empty, set and go to next.
-            if (global_hash_table.entries[index].hash == 0)
+            if (global_hash_table.kmer[index].hash == 0)
             {
-                global_hash_table.entries[index] = local_ht->entries[i];
+                global_hash_table.kmer[index] = local_ht->kmer[i];
                 new_global_size++; // we update size later, once.
                 continue;
             }
 
             size_t original_index = index;
-            uint64_t offset = find_hash_offset(local_ht->entries[i].hash, 0);
-            // printf("Thread %d: Master Hash at index %zu has hash %lu and local is %lu\n", thread_id, index, global_hash_table.entries[index].hash, local_ht->entries[i].hash);
+            uint64_t offset = find_hash_offset(local_ht->kmer[i].hash, 0);
+            // printf("Thread %d: Master Hash at index %zu has hash %lu and local is %lu\n", thread_id, index, global_hash_table.kmer[index].hash, local_ht->kmer[i].hash);
 
-            while (global_hash_table.entries[index].hash != 0 &&
-                   global_hash_table.entries[index].hash != local_ht->entries[i].hash)
+            while (global_hash_table.kmer[index].hash != 0 &&
+                   global_hash_table.kmer[index].hash != local_ht->kmer[i].hash)
             {
                 if (cfg.debug > 2)
                     if (collision_count == 1)
-                        printf("Thread %d: Master Hash is %lu for index %zu, local is %lu, collision %d\n", thread_id, global_hash_table.entries[index].hash, index, local_ht->entries[i].hash, collision_count);
+                        printf("Thread %d: Master Hash is %lu for index %zu, local is %lu, collision %d\n", thread_id, global_hash_table.kmer[index].hash, index, local_ht->kmer[i].hash, collision_count);
 
                 index = (index + offset) % global_hash_table.capacity;
 //                  index = (index + 1) % global_hash_table.capacity;
@@ -1369,15 +1369,15 @@ void synchronise_hash_tables(hash_table_t *local_ht, int thread_id)
                 }
             }
 
-            if (global_hash_table.entries[index].hash == 0)
+            if (global_hash_table.kmer[index].hash == 0)
             {
-                global_hash_table.entries[index] = local_ht->entries[i];
+                global_hash_table.kmer[index] = local_ht->kmer[i];
                 new_global_size++; // we update size later, once.
             }
             else
             {
-                __atomic_add_fetch(&global_hash_table.entries[index].count,
-                                   local_ht->entries[i].count, __ATOMIC_SEQ_CST);
+                __atomic_add_fetch(&global_hash_table.kmer[index].count,
+                                   local_ht->kmer[i].count, __ATOMIC_SEQ_CST);
             }
         }
     }
@@ -1388,16 +1388,16 @@ void synchronise_hash_tables(hash_table_t *local_ht, int thread_id)
     global_hash_table.used = new_global_size;
 
     // Copy Master Hash table back to local hash table
-    if (local_ht->entries)
-        free(local_ht->entries);
-    local_ht->entries = calloc(global_hash_table.capacity, sizeof(kmer_t));
-    if (!local_ht->entries)
+    if (local_ht->kmer)
+        free(local_ht->kmer);
+    local_ht->kmer = calloc(global_hash_table.capacity, sizeof(kmer_t));
+    if (!local_ht->kmer)
     {
         fprintf(stderr, "Thread %d: Memory allocation failed in synchronize_hash_tables\n", thread_id);
         exit(EXIT_FAILURE);
     }
 
-    memcpy(local_ht->entries, global_hash_table.entries, global_hash_table.capacity * sizeof(kmer_t));
+    memcpy(local_ht->kmer, global_hash_table.kmer, global_hash_table.capacity * sizeof(kmer_t));
     local_ht->used = global_hash_table.used;
     local_ht->capacity = global_hash_table.capacity;
 
@@ -1514,7 +1514,7 @@ int main(int argc, char *argv[])
         fclose(thread_data[i].thread_output_reverse);
         free(thread_data[i].thread_output_forward_filename);
         free(thread_data[i].thread_output_reverse_filename);
-        free(thread_data[i].hash_table->entries);
+        free(thread_data[i].hash_table->kmer);
         free(thread_data[i].hash_table);
     }
 
@@ -1526,7 +1526,7 @@ int main(int argc, char *argv[])
 
 cleanup:
     // Clean up
-    free(global_hash_table.entries);
+    free(global_hash_table.kmer);
     for (int i = 0; i < cfg.forward_file_count; i++)
     {
         free(cfg.forward_files[i]);

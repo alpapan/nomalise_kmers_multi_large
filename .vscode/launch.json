@@ -334,6 +334,42 @@
       ],
       "preLaunchTask": "gcc build active file",
       "miDebuggerPath": "/usr/bin/gdb"
+    },
+    {
+      "name": "1x large file, threaded, print table",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${fileDirname}/${fileBasenameNoExtension}",
+      "args": [
+        "--forward",
+        "test/forward.fastq",
+        "--reverse",
+        "test/reverse.fastq",
+        "--depth",
+        "4",
+        "--verbose",
+        "--debug",
+        "1",
+        "-p",
+        "2",
+        "-m",
+        "2",
+        "-P"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "gcc build active file",
+      "miDebuggerPath": "/usr/bin/gdb"
     }
   ]
 }

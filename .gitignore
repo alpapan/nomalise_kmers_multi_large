@@ -2,3 +2,4 @@ output_*
 normalise_kmers_multi
 normalise_kmers_multi_large
 normalise_kmers_multi_large_*
+log*
