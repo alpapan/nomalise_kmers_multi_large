@@ -16,6 +16,10 @@
 // DONE: support single end data
 // 20240822: this has now been done
 
+// TODO: add advice of kmer size vs memory, for example a k=15 with 16gb ram per hash will produce no collisions.
+// calc 16*4^15/1024^3=16
+// but speed increase is not always obvious as lower k requires more kmers calculated
+
 // TODO: initiate a table sync when there is no consequence on wait time:
 // when the file is being read to decide where to split it amongst the threads
 
@@ -79,7 +83,7 @@
 /// registry of allocs (malloc realloc calloc)
 // output_filename
 // hash_table_t
-// hash_table_t->entries
+// hash_table_t->kmer
 // forward_pointer // managed by mmap
 // reverse_pointer // managed by mmap
 // cfg.forward_files
@@ -120,7 +124,7 @@ typedef struct
 
 typedef struct hash_table_t
 {
-    kmer_t *entries;
+    kmer_t *kmer;
     size_t used;
     size_t capacity;
 } hash_table_t;
@@ -185,6 +189,7 @@ struct config_t
     size_t initial_hash_size;
     int version;
     int singleend;
+    int doprint;
 } cfg;
 
 typedef struct
@@ -193,25 +198,11 @@ typedef struct
     size_t size;
 } mmap_file_t;
 
-// job management
-typedef struct Job
-{
-    void (*function)(void *);
-    void *argument;
-    struct Job *next;
-} Job;
-
-typedef struct
-{
-    Job *head;
-    Job *tail;
-    int job_count;
-    int shutdown;
-    pthread_mutex_t lock;
-    pthread_cond_t notify;
-} ThreadPool;
-
 // Function prototypes
+int compare_kmer_count_asc(const void *a, const void *b);
+int compare_kmer_count_desc(const void *a, const void *b);
+void sort_kmer_table(hash_table_t *ht, bool do_desc, int thread_id);
+void print_kmer_table(hash_table_t *ht, char *identifier, bool do_desc, int thread_id);
 size_t sizet_increment_even(size_t num);
 char *read_line(char *ptr, char *buffer, int max_length);
 float capacity2memory(size_t capacity);
@@ -219,7 +210,6 @@ size_t memoryGB2capacity(int memory);
 mmap_file_t mmap_file(const char *filename);
 void munmap_file(mmap_file_t *mf);
 static void replacestr(const char *line, const char *search, const char *replace);
-bool is_in_list(const char *target, const char *list[], size_t list_size);
 ////
 
 void print_usage();
@@ -230,49 +220,111 @@ char *create_output_filename(const char *basename, int k, int norm_depth, int th
 void fastq_to_fasta(char (*fastq_record)[4][MAX_LINE_LENGTH], char *fasta_output, bool is_forward);
 
 ////
-
+void destroy_hash_table(hash_table_t *ht);
 void init_hash_table(hash_table_t *ht);
 hash_table_t *copy_hash_table(const hash_table_t *source);
-size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool do_init);
+size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool do_init, char *kmer);
 size_t expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread_id);
-void synchronise_hash_tables(hash_table_t *local_ht, int thread_id);
 
 ////
-
 static inline uint64_t encode_kmer_plain(const char *seq, int k);
 char decode_kmer_plain(uint64_t encoded, int k, char *kmer);
 
 ////
-
 bool valid_dna(const char *sequence);
 void reverse_complement(const char *seq, char *rev_comp, int k);
 const char *get_canonical_kmer(const char *kmer, int k);
 
 ////
 size_t find_thread_exact_end(char *data, size_t start_pos, size_t end_pos);
-void sequence_to_hash(const char *seq, hash_table_t *hash_table, int *seq_high_count_kmers, int *total_seq_kmers, int K, int depth_per_cpu);
-void sequence_to_hash_zero(const char *seq, hash_table_t *hash_table, int K, int depth_per_cpu);
 bool process_sequence_pair(const char *fwd_seq, const char *rev_seq, hash_table_t *hash_table, int *fwd_seq_high_count_kmers,
                            int *fwd_total_seq_kmers, int *rev_seq_high_count_kmers, int *rev_total_seq_kmers, int thread_id, int K, int depth_per_cpu);
 void calculate_thread_positions(char *data, size_t total_file_size, int thread_count, size_t **thread_starts, size_t **thread_ends);
+void calculate_thread_positions_from_records(char *data, size_t total_file_size, int thread_count, size_t **thread_starts, size_t **thread_ends, size_t records);
+size_t count_records_seqfile(char *data, size_t size);
+void seed_kmer_hash(char *file, int records_to_seed, hash_table_t *ht, int K, int depth_per_cpu);
+void sequence_to_hash(const char *seq, hash_table_t *hash_table, int *seq_high_count_kmers, int *total_seq_kmers, int K, int depth_per_cpu, int thread_id);
+void sequence_to_hash_zero(const char *seq, hash_table_t *hash_table, int K, int depth_per_cpu);
+bool is_valid_sequence_single(const char *fwd_seq, int K);
+bool is_valid_sequence_pair(const char *fwd_seq, const char *rev_seq, int K);
 void *process_thread_chunk_paired(void *arg);
 int multithreaded_process_files_paired(thread_data_t *thread_data, mmap_file_t *forward_mmap, mmap_file_t *reverse_mmap);
+void *process_thread_chunk_single(void *arg);
+int multithreaded_process_files_single(thread_data_t *thread_data, mmap_file_t *forward_mmap);
 
 ////////////////////////////////////////////////////////////////
 ////////// HELPER FUNCTIONS ////////////////////////////////////
 ////////////////////////////////////////////////////////////////
-void print_kmer_table(hash_table_t *ht, int thread_id)
+int compare_kmer_asc(const void *a, const void *b)
 {
-    char *kmer_file = create_output_filename("output_kmer", cfg.ksize, cfg.depth_per_cpu, thread_id, "tsv");
+    kmer_t *kmerA = (kmer_t *)a;
+    kmer_t *kmerB = (kmer_t *)b;
+    char kmerA_str[cfg.ksize + 1];
+    char kmerB_str[cfg.ksize + 1];
+    decode_kmer_plain(kmerA->hash, cfg.ksize, kmerA_str);
+    decode_kmer_plain(kmerB->hash, cfg.ksize, kmerB_str);
+    return (*(char *)kmerA_str - *(char *)kmerB_str);
+}
+
+int compare_kmer_count_asc(const void *a, const void *b)
+{
+    kmer_t *kmerA = (kmer_t *)a;
+    kmer_t *kmerB = (kmer_t *)b;
+
+    return kmerA->count - kmerB->count;
+}
+
+int compare_kmer_count_desc(const void *a, const void *b)
+{
+    kmer_t *kmerA = (kmer_t *)a;
+    kmer_t *kmerB = (kmer_t *)b;
+
+    return kmerB->count - kmerA->count;
+}
+
+void sort_kmer_table(hash_table_t *ht, bool do_desc, int thread_id)
+{
+
+    if (cfg.verbose)
+    {
+        if (thread_id < 0)
+            printf("Seed: sorting hash table\n");
+        else
+            printf("Thread %d - sorting hash table\n", thread_id);
+    }
+    // if (do_desc == true)
+    //     qsort(ht->kmer, ht->used, sizeof(kmer_t), compare_kmer_count_desc);
+    // else
+    //     qsort(ht->kmer, ht->used, sizeof(kmer_t), compare_kmer_count_asc);
+    // qsort(ht->kmer, ht->capacity, sizeof(kmer_t), compare_kmer_asc);
+}
+
+void print_kmer_table(hash_table_t *ht, char *identifier, bool do_desc, int thread_id)
+{
+    sort_kmer_table(ht, do_desc, thread_id);
+
+    if (cfg.verbose)
+    {
+        if (thread_id < 0)
+            printf("Seed: printing kmer table\n");
+        else
+            printf("Thread %d - printing kmer table\n", thread_id);
+    }
+    char name[24];
+    snprintf(name, sizeof(name), "output_kmer%s", identifier);
+    char *kmer_file = create_output_filename(name, cfg.ksize, cfg.depth_per_cpu, thread_id, "tsv");
     FILE *kmer_out = fopen(kmer_file, "w");
 
-    for (size_t index = 0; index < ht->used; index++)
+    for (size_t index = 0; index < ht->capacity; index++)
     {
-        if (ht->entries[index].hash != 0)
+
+        if (ht->kmer[index].hash && ht->kmer[index].hash != 0)
         {
             char kmer_str[cfg.ksize + 1];
-            decode_kmer_plain(ht->entries[index].hash, cfg.ksize, kmer_str);
-            fprintf(kmer_out, "%s\t%d\n", kmer_str, ht->entries[index].count);
+            decode_kmer_plain(ht->kmer[index].hash, cfg.ksize, kmer_str);
+
+            if (kmer_str)
+                fprintf(kmer_out, "%s\t%d\n", kmer_str, ht->kmer[index].count);
         }
     }
 
@@ -287,7 +339,6 @@ size_t sizet_increment_even(size_t num)
 
     return num;
 }
-
 char *read_line(char *ptr, char *buffer, int max_length)
 {
     int i = 0;
@@ -448,15 +499,19 @@ int parse_arguments(int argc, char *argv[])
         {"canonical", no_argument, 0, 'c'},
         {"version", no_argument, 0, 'v'},
         {"single", no_argument, 0, 's'},
+        {"print", no_argument, 0, 'P'},
         {0, 0, 0, 0}};
 
     int opt;
     int option_index = 0;
 
-    while ((opt = getopt_long(argc, argv, "f:r:k:d:g:t:o:p:m:b:ehcvs", long_options, &option_index)) != -1)
+    while ((opt = getopt_long(argc, argv, "f:r:k:d:g:t:o:p:m:b:ehcvsP", long_options, &option_index)) != -1)
     {
         switch (opt)
         {
+        case 'P':
+            cfg.doprint = 1;
+            break;
         case 's':
             cfg.singleend = 1;
             break;
@@ -478,6 +533,7 @@ int parse_arguments(int argc, char *argv[])
             cfg.help = 1;
             print_usage();
             exit(EXIT_SUCCESS);
+            break;
         case 'p':
             cfg.cpus = atoi(optarg);
             break;
@@ -544,6 +600,7 @@ int parse_arguments(int argc, char *argv[])
         default:
             fprintf(stderr, "Unexpected error in option processing\n");
             return 0;
+            break;
         }
     }
     if (cfg.verbose)
@@ -726,7 +783,12 @@ char *create_output_filename(const char *basename, int k, int norm_depth, int th
         fprintf(stderr, "Memory allocation failed\n");
         exit(EXIT_FAILURE);
     }
-    snprintf(output_filename, len, "%s.k%d_norm%d_thread%d.%s", basename, k, norm_depth, thread, suffix);
+
+    if (thread >= 0)
+        snprintf(output_filename, len, "%s.k%d_norm%d_thread%d.%s", basename, k, norm_depth, thread, suffix);
+    else
+        snprintf(output_filename, len, "%s.k%d_norm%d.%s", basename, k, norm_depth, suffix);
+
     return output_filename;
 }
 
@@ -761,23 +823,23 @@ void fastq_to_fasta(char (*fastq_record)[4][MAX_LINE_LENGTH], char *fasta_output
 ////////////////////////////////////////////////////////////////
 void destroy_hash_table(hash_table_t *ht)
 {
-    if (ht && ht->entries)
+    if (ht && ht->kmer)
     {
-        free(ht->entries);
-        ht->entries = NULL;
+        free(ht->kmer);
+        ht->kmer = NULL;
     }
 }
 
 void init_hash_table(hash_table_t *ht)
 {
-    if (ht && ht->entries && ht->used > 0)
+    if (ht && ht->kmer && ht->used > 0)
     {
         printf("Existing hash table with %zu entries found (shouldn't happen)\n", ht->used);
         exit(EXIT_FAILURE);
     }
 
-    ht->entries = calloc(cfg.initial_hash_size, sizeof(kmer_t));
-    if (!ht->entries)
+    ht->kmer = calloc(cfg.initial_hash_size, sizeof(kmer_t));
+    if (!ht->kmer)
     {
         fprintf(stderr, "Memory allocation failed\n");
         exit(EXIT_FAILURE);
@@ -796,18 +858,18 @@ hash_table_t *copy_hash_table(const hash_table_t *source)
     }
     copy->capacity = source->capacity;
     copy->used = source->used;
-    copy->entries = calloc(copy->capacity, sizeof(kmer_t));
-    if (!copy->entries)
+    copy->kmer = calloc(copy->capacity, sizeof(kmer_t));
+    if (!copy->kmer)
     {
         fprintf(stderr, "Memory allocation failed\n");
         free(copy);
         exit(EXIT_FAILURE);
     }
-    memcpy(copy->entries, source->entries, copy->capacity * sizeof(kmer_t));
+    memcpy(copy->kmer, source->kmer, copy->capacity * sizeof(kmer_t));
     return copy;
 }
 
-size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool do_init)
+size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool do_init, char *kmer)
 {
     // this happens locally on a thread specific hash_table so no requirement to do any locking
 
@@ -822,27 +884,70 @@ size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool d
         exit(EXIT_FAILURE);
     }
 
+    if (cfg.debug > 2)
+        printf("DEBUG: Kmer hash: %lu, Count: %d\n", hash, hash_table->kmer[index].count);
+
     // if entry is null and available:
-    if (hash_table->entries[index].hash == 0)
+    if (hash_table->kmer[index].hash == 0)
     {
         if (cfg.debug > 3)
         {
             char kmer_str[cfg.ksize + 1];
             decode_kmer_plain(hash, cfg.ksize, kmer_str);
-            printf("new kmer %s, hash %zu at index %zu. Existing entry is %zu and hash capacity is %zu and used size %zu\n", kmer_str, hash, index, hash_table->entries[index].hash, hash_table->capacity, hash_table->used);
+            printf("Thread %d: new kmer %s derived from %s, hash %zu (existing: %zu) at index %zu. Existing count is %d, and hash capacity is %zu and used size %zu", thread_id, kmer_str, kmer, hash, hash_table->kmer[index].hash, index, hash_table->kmer[index].count, hash_table->capacity, hash_table->used);
+
+            if (strcmp(kmer_str, kmer) != 0)
+            {
+                printf("\n Thes two kmers are not the same!\n");
+                exit(EXIT_FAILURE);
+            }
         }
-        hash_table->entries[index].hash = hash;
-        hash_table->entries[index].count = (do_init == true) ? 0 : 1;
+        hash_table->kmer[index].hash = hash;
+        hash_table->kmer[index].count = (do_init == true) ? (int)0 : 1;
         // new kmer inserted, so increase size used.
         hash_table->used++;
+
+        if (cfg.debug > 3)
+            printf(" new count is %d, and new used size %zu\n", hash_table->kmer[index].count, hash_table->used);
+
         return index;
     }
-    else if (hash_table->entries[index].hash == hash)
+    else if (hash_table->kmer[index].hash == hash)
     {
+        if (cfg.debug > 3)
+        {
+            char kmer_str[cfg.ksize + 1];
+            decode_kmer_plain(hash, cfg.ksize, kmer_str);
+            printf("Thread %d: existing kmer %s derived from %s, hash %'zu (existing: %'zu) at index %zu. Existing count is %d, and hash capacity is %'zu and used size %'zu",
+                   thread_id, kmer_str, kmer, hash, hash_table->kmer[index].hash, index, hash_table->kmer[index].count, hash_table->capacity, hash_table->used);
+
+            // if (thread_id < 0 && hash_table->kmer[index].count != 0)
+            // {
+            //     printf(" This should have happened\n");
+            //     exit(EXIT_FAILURE);
+            // }
+
+            if (strcmp(kmer_str, kmer) != 0)
+            {
+                printf("\n These two kmers are not the same!\n");
+                exit(EXIT_FAILURE);
+            }
+        }
+
         if (do_init == true)
+        {
+            if (cfg.debug > 3)
+            {
+                printf(" seed initialisation so not updating count.\n");
+            }
             return index;
+        }
         else
-            hash_table->entries[index].count++;
+            hash_table->kmer[index].count++;
+        if (cfg.debug > 3)
+        {
+            printf(" new count is %d, and new used size %'zu\n", hash_table->kmer[index].count, hash_table->used);
+        }
     }
     else // collision
     {
@@ -850,10 +955,10 @@ size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool d
         size_t original_index = index;
         int collisions = 0;
 
-        while (hash_table->entries[index].hash != 0 && hash_table->entries[index].hash != hash)
+        while (hash_table->kmer[index].hash != 0 && hash_table->kmer[index].hash != hash)
         {
             collisions++;
-            if (cfg.debug > 2)
+            if (cfg.debug > 4)
                 printf("Thread %d: hash %'zu collision consecutive number %d, index: %'zu -> %'zu, capacity %'zu\n", thread_id, hash, collisions, original_index, index, hash_table->capacity);
 
             if ((collisions / hash_table->capacity) > (hash_table->capacity * 0.5))
@@ -870,12 +975,15 @@ size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool d
                 exit(EXIT_FAILURE);
             }
 
-            hash_table->entries[index].count++;
+            if (do_init == false)
+                hash_table->kmer[index].count++;
+            else
+                hash_table->kmer[index].count = (int)0;
         }
     }
 
-    if (cfg.debug > 3)
-        printf("DEBUG: Kmer hash: %lu, Count: %d\n", hash, hash_table->entries[index].count);
+    if (cfg.debug > 2)
+        printf("DEBUG: New Kmer hash: %lu, Count: %d\n", hash, hash_table->kmer[index].count);
     return index;
 }
 
@@ -903,23 +1011,23 @@ size_t expand_local_hash_table(hash_table_t *ht, size_t new_capacity, int thread
 
     for (size_t i = 0; i < ht->capacity; i++)
     {
-        if (ht->entries[i].hash != 0)
+        if (ht->kmer[i].hash != 0)
         {
             // kmer is stored at an index based on its capacity so when that increases, indexes change
-            size_t new_index = ht->entries[i].hash % new_capacity;
+            size_t new_index = ht->kmer[i].hash % new_capacity;
             while (new_entries[new_index].hash != 0)
             {
                 new_index = (new_index + 1) % new_capacity;
             }
-            new_entries[new_index] = ht->entries[i];
+            new_entries[new_index] = ht->kmer[i];
             new_hash_size++;
         }
     }
 
-    if (ht->entries)
-        free(ht->entries);
+    if (ht->kmer)
+        free(ht->kmer);
 
-    ht->entries = new_entries;
+    ht->kmer = new_entries;
     ht->capacity = new_capacity;
     ht->used = new_hash_size;
 
@@ -1164,7 +1272,7 @@ void seed_kmer_hash(char *file, int records_to_seed, hash_table_t *ht, int K, in
 
         if (mmapped.data[character] == '\n')
         {
-            record[line_count][char_index] = '\0';
+            record[line_count][char_index - 1] = '\0'; // replace newline with \0
             char_index = 0;
             line_count++;
 
@@ -1173,6 +1281,9 @@ void seed_kmer_hash(char *file, int records_to_seed, hash_table_t *ht, int K, in
 
                 if (strlen(record[1]) > K)
                 {
+                    if (is_valid_sequence_single(record[1], K) == false)
+                        exit(EXIT_FAILURE);
+
                     sequence_to_hash_zero(record[1], ht, K, depth_per_cpu);
                     record_count++;
                     if (record_count == records_to_seed)
@@ -1192,6 +1303,7 @@ void seed_kmer_hash(char *file, int records_to_seed, hash_table_t *ht, int K, in
     munmap_file(&mmapped);
     if (cfg.verbose)
         printf("%'d records with %'zu kmers seeded\n", record_count, ht->used);
+
     return;
 }
 
@@ -1279,7 +1391,7 @@ bool is_valid_sequence_pair(const char *fwd_seq, const char *rev_seq, int K)
     return true;
 }
 
-void sequence_to_hash(const char *seq, hash_table_t *hash_table, int *seq_high_count_kmers, int *total_seq_kmers, int K, int depth_per_cpu)
+void sequence_to_hash(const char *seq, hash_table_t *hash_table, int *seq_high_count_kmers, int *total_seq_kmers, int K, int depth_per_cpu, int thread_id)
 {
     // if (cfg.debug > 3)
     // printf("Kmerising Sequence %s\n", seq);
@@ -1307,14 +1419,14 @@ void sequence_to_hash(const char *seq, hash_table_t *hash_table, int *seq_high_c
             continue;
 
         (*total_seq_kmers)++;
-        size_t index = store_kmer(hash_table, hash, 0, false);
+        size_t index = store_kmer(hash_table, hash, thread_id, false, kmer);
 
         if (index < 0)
         {
             fprintf(stderr, "ERROR3: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
             exit(EXIT_FAILURE);
         }
-        if (hash_table->entries[index].count >= depth_per_cpu)
+        if (hash_table->kmer[index].count >= depth_per_cpu)
         {
             (*seq_high_count_kmers)++;
         }
@@ -1331,6 +1443,7 @@ void sequence_to_hash_zero(const char *seq, hash_table_t *hash_table, int K, int
         char kmer[K + 1];
         strncpy(kmer, seq + i, K);
         kmer[K] = '\0';
+        // printf("length is %zu (%s)\n", strlen(kmer), kmer);
 
         uint64_t hash = 0;
 
@@ -1348,7 +1461,7 @@ void sequence_to_hash_zero(const char *seq, hash_table_t *hash_table, int K, int
         if (hash == 0)
             continue;
 
-        size_t index = store_kmer(hash_table, hash, 0, true);
+        size_t index = store_kmer(hash_table, hash, -1, true, kmer);
 
         if (index < 0)
         {
@@ -1366,7 +1479,7 @@ bool process_sequence_single(const char *fwd_seq, hash_table_t *hash_table, int 
 
     *fwd_seq_high_count_kmers = 0;
     *fwd_total_seq_kmers = 0;
-    sequence_to_hash(fwd_seq, hash_table, fwd_seq_high_count_kmers, fwd_total_seq_kmers, K, depth_per_cpu);
+    sequence_to_hash(fwd_seq, hash_table, fwd_seq_high_count_kmers, fwd_total_seq_kmers, K, depth_per_cpu, thread_id);
 
     return true;
 }
@@ -1378,11 +1491,11 @@ bool process_sequence_pair(const char *fwd_seq, const char *rev_seq, hash_table_
 
     *fwd_seq_high_count_kmers = 0;
     *fwd_total_seq_kmers = 0;
-    sequence_to_hash(fwd_seq, hash_table, fwd_seq_high_count_kmers, fwd_total_seq_kmers, K, depth_per_cpu);
+    sequence_to_hash(fwd_seq, hash_table, fwd_seq_high_count_kmers, fwd_total_seq_kmers, K, depth_per_cpu, thread_id);
 
     *rev_seq_high_count_kmers = 0;
     *rev_total_seq_kmers = 0;
-    sequence_to_hash(rev_seq, hash_table, rev_seq_high_count_kmers, rev_total_seq_kmers, K, depth_per_cpu);
+    sequence_to_hash(rev_seq, hash_table, rev_seq_high_count_kmers, rev_total_seq_kmers, K, depth_per_cpu, thread_id);
 
     return true;
 }
@@ -1676,7 +1789,7 @@ int multithreaded_process_files_paired(thread_data_t *thread_data, mmap_file_t *
 
         // printf("forward/reverse size %zu/%zu chunk %s/%s\n", thread_data[i].forward_size, thread_data[i].reverse_size, forward_chunk_end, reverse_chunk_end);
 
-        if (cfg.debug > 1)
+        if (cfg.debug > 0)
             printf("Starting thread %d\n", thread_number);
 
         if (pthread_create(&threads[thread_number], NULL, process_thread_chunk_paired, &thread_data[thread_number]) != 0)
@@ -1721,7 +1834,8 @@ int multithreaded_process_files_paired(thread_data_t *thread_data, mmap_file_t *
         total_skipped += thread_data[thread_number].skipped_count;
         max_total_kmers_in_threads = (max_total_kmers_in_threads < thread_data[thread_number].hash_table->used) ? thread_data[thread_number].hash_table->used : max_total_kmers_in_threads;
 
-        // print_kmer_table(thread_data[thread_number].hash_table, thread_number);
+        if (cfg.doprint)
+            print_kmer_table(thread_data[thread_number].hash_table, "", true, thread_number);
     }
     reporting.total_processed = total_processed;
     reporting.total_printed = total_printed;
@@ -1978,7 +2092,7 @@ int multithreaded_process_files_single(thread_data_t *thread_data, mmap_file_t *
 
         // printf("forward/reverse size %zu/%zu chunk %s/%s\n", thread_data[i].forward_size, thread_data[i].reverse_size, forward_chunk_end, reverse_chunk_end);
 
-        if (cfg.debug > 1)
+        if (cfg.debug > 0)
             printf("Starting thread %d\n", thread_number);
 
         if (pthread_create(&threads[thread_number], NULL, process_thread_chunk_single, &thread_data[thread_number]) != 0)
@@ -2021,7 +2135,8 @@ int multithreaded_process_files_single(thread_data_t *thread_data, mmap_file_t *
         total_skipped += thread_data[thread_number].skipped_count;
         max_total_kmers_in_threads = (max_total_kmers_in_threads < thread_data[thread_number].hash_table->used) ? thread_data[thread_number].hash_table->used : max_total_kmers_in_threads;
 
-        // print_kmer_table(thread_data[thread_number].hash_table, thread_number);
+        if (cfg.doprint)
+            print_kmer_table(thread_data[thread_number].hash_table, "", true, thread_number);
     }
     reporting.total_processed = total_processed;
     reporting.total_printed = total_printed;
@@ -2063,6 +2178,8 @@ int main(int argc, char *argv[])
     init_hash_table(&seed_hash);
     int records_to_seed = 1 + (SEED_NUMBER / cfg.forward_file_count);
 
+    print_kmer_table(&seed_hash, "_seeds", true, -1);
+
     for (int file_index = 0; file_index < cfg.forward_file_count; file_index++)
     {
         seed_kmer_hash(cfg.forward_files[file_index], records_to_seed, &seed_hash, cfg.ksize, cfg.depth);
@@ -2070,6 +2187,9 @@ int main(int argc, char *argv[])
         if (file_index < cfg.reverse_file_count)
             seed_kmer_hash(cfg.reverse_files[file_index], records_to_seed, &seed_hash, cfg.ksize, cfg.depth);
     }
+    if (cfg.doprint)
+        print_kmer_table(&seed_hash, "_seeds", true, -1);
+
     thread_data_t thread_data[cfg.cpus];
 
     // need a for loop for any data that will stay between runs
@@ -2223,7 +2343,7 @@ int main(int argc, char *argv[])
             fclose(thread_data[thread_number].thread_output_reverse);
             free(thread_data[thread_number].thread_output_reverse_filename);
         }
-        free(thread_data[thread_number].hash_table->entries);
+        free(thread_data[thread_number].hash_table->kmer);
         free(thread_data[thread_number].hash_table);
     }
 
