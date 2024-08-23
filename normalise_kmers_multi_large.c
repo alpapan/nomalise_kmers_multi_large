@@ -460,14 +460,16 @@ void print_usage()
                     "\n\t\t* --reverse|-r file1 [file2+]\tList of reverse (read2) sequence files"
                     "\n\n\t\tOptional:"
                     "\n\t\t[--single|-s] data are single ended, any --forward files not matched with --reverse will be treated as single-end"
-                    "\n\t\t[--ksize|-k (integer 5-32; def. 25)]\tNumber of what size of K to use (must be between 5 and 32)"
+                    "\n\t\t[--ksize|-k (integer 5-32; def. 15)]\tNumber of what size of K to use (must be between 5 and 32)"
                     "\n\t\t[--depth|-d (integer; def. 100)]\tNumber determining when a kmer is tagged as high coverage (defaults to 100),"
                     "\n\t\t\t\t\t\t\tmust be above 2xCPU count as each CPU calculates depth independently"
                     "\n\t\t[--coverage|-g (float 0-1; def. 0.9)]\tProportion (0-1) of sequence that must be covered by high coverage kmers before tagging as redundant"
                     "\n\t\t[--canonical|-c]\t\t\tFlag to ask the program to merge kmers from forward and reverse complement forms (e.g. for DNA-Seq or unstranded RNA-Seq)"
                     "\n\t\t[--filetype|-t (fq|fa; def. fq)]\tWhether the input files are fastq or fasta"
                     "\n\t\t[--outformat|-o (fq|fa; def. fq)]\tWhether you want the output files as fastq or fasta (e.g. for Trinity)"
-                    "\n\t\t[--memory_start|-m (integer; def. 1)]\tNumber in Gb of the total memory the program will initially allocate across all threads. The program may request more memory when needed but very small values will cause it to slow down"
+                    "\n\t\t[--memory_start|-m (integer; def. 1)]\tNumber in Gb of the total memory the program will initially allocate across all threads."
+                    "\n\t\t\t\t\t\t\tThe program may request more memory when needed but very small values will cause it to slow down."
+                    "\n\t\t\t\t\t\t\tEach kmer takes 16 bytes of RAM and up to 4^k kmers are expected (i.e. k=15 needs 16gb per CPU)."
                     "\n\t\t[--cpu|-p (int; def 1)]\t\t\tNumber of CPUs that will process the input files, each file is processed sequentially after distributing to the CPUs"
                     "\n\t\t[--verbose|-e]\t\t\t\tEntertain the user"
                     "\n\t\t[--debug|-b]\t\t\t\tAnnoy the developer"
@@ -490,7 +492,7 @@ int parse_arguments(int argc, char *argv[])
     cfg.reverse_file_count = 0;
     cfg.forward_files = NULL;
     cfg.reverse_files = NULL;
-    cfg.ksize = 25;
+    cfg.ksize = 15;
     cfg.depth = 100;
     cfg.depth_per_cpu = cfg.depth / cfg.cpus;
     cfg.memory = 0; // default from INITIAL_CAPACITY - set to be a prime just above 1Gb memory.
