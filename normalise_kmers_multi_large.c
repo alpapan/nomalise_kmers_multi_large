@@ -404,7 +404,7 @@ mmap_file_t mmap_file(const char *filename)
 
     result.size = sb.st_size;
     if (cfg.debug > 1)
-        printf("File size: %zu\n", result.size);
+        printf("File size: %'zu\n", result.size);
 
     result.data = mmap(NULL, result.size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (result.data == MAP_FAILED)
@@ -861,7 +861,7 @@ void init_hash_table(hash_table_t *ht)
 {
     if (ht && ht->kmer && ht->used > 0)
     {
-        printf("Existing hash table with %zu entries found (shouldn't happen)\n", ht->used);
+        printf("Existing hash table with %'zu entries found (shouldn't happen)\n", ht->used);
         exit(EXIT_FAILURE);
     }
 
@@ -907,7 +907,7 @@ size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool d
 
     if (index < 0)
     {
-        fprintf(stderr, "ERROR1: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
+        fprintf(stderr, "ERROR1: This shouldnt have happened, index %'zu hash %'zu capacity %'zu\n", index, hash, hash_table->capacity);
         exit(EXIT_FAILURE);
     }
 
@@ -921,7 +921,7 @@ size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool d
         {
             char kmer_str[cfg.ksize + 1];
             decode_kmer_plain(hash, cfg.ksize, kmer_str);
-            printf("Thread %d: new kmer %s derived from %s, hash %zu (existing: %zu) at index %zu. Existing count is %d, and hash capacity is %zu and used size %zu", thread_id, kmer_str, kmer, hash, hash_table->kmer[index].hash, index, hash_table->kmer[index].count, hash_table->capacity, hash_table->used);
+            printf("Thread %d: new kmer %s derived from %s, hash %'zu (existing: %'zu) at index %'zu. Existing count is %d, and hash capacity is %'zu and used size %'zu", thread_id, kmer_str, kmer, hash, hash_table->kmer[index].hash, index, hash_table->kmer[index].count, hash_table->capacity, hash_table->used);
 
             if (strcmp(kmer_str, kmer) != 0)
             {
@@ -935,7 +935,7 @@ size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool d
         hash_table->used++;
 
         if (cfg.debug > 3)
-            printf(" new count is %d, and new used size %zu\n", hash_table->kmer[index].count, hash_table->used);
+            printf(" new count is %d, and new used size %'zu\n", hash_table->kmer[index].count, hash_table->used);
 
         return index;
     }
@@ -945,7 +945,7 @@ size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool d
         {
             char kmer_str[cfg.ksize + 1];
             decode_kmer_plain(hash, cfg.ksize, kmer_str);
-            printf("Thread %d: existing kmer %s derived from %s, hash %'zu (existing: %'zu) at index %zu. Existing count is %d, and hash capacity is %'zu and used size %'zu",
+            printf("Thread %d: existing kmer %s derived from %s, hash %'zu (existing: %'zu) at index %'zu. Existing count is %d, and hash capacity is %'zu and used size %'zu",
                    thread_id, kmer_str, kmer, hash, hash_table->kmer[index].hash, index, hash_table->kmer[index].count, hash_table->capacity, hash_table->used);
 
             // if (thread_id < 0 && hash_table->kmer[index].count != 0)
@@ -998,7 +998,7 @@ size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool d
             index = (index + 1) % hash_table->capacity;
             if (index < 0)
             {
-                fprintf(stderr, "ERROR1: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
+                fprintf(stderr, "ERROR1: This shouldnt have happened, index %'zu hash %'zu capacity %'zu\n", index, hash, hash_table->capacity);
                 exit(EXIT_FAILURE);
             }
 
@@ -1175,7 +1175,7 @@ size_t find_thread_exact_end(char *data, size_t start_pos, size_t end_pos)
         bool header_qual_found = false;
         for (size_t i = end_pos; i > start_pos; i--) // loop backwards
         {
-            // printf("1:checking start position at %zu, line_break_count %d, line is %c\n", i, line_break_count, data[i]);
+            // printf("1:checking start position at %'zu, line_break_count %d, line is %c\n", i, line_break_count, data[i]);
             if (data[i] == '\n') // when we have a new line, check the next character.
             {
                 line_break_count++;
@@ -1185,14 +1185,14 @@ size_t find_thread_exact_end(char *data, size_t start_pos, size_t end_pos)
                     return i;
                 if (line_break_count == 7)
                 {
-                    printf("ERROR: after 7 lines, I couldn't find the + and @ headers near this chunk %zu\n", i);
+                    printf("ERROR: after 7 lines, I couldn't find the + and @ headers near this chunk %'zu\n", i);
                     exit(EXIT_FAILURE);
                 }
             }
         }
     }
 
-    printf("ERROR: i couldn't find the start of sequence before this chunk end %zu\n", end_pos);
+    printf("ERROR: i couldn't find the start of sequence before this chunk end %'zu\n", end_pos);
     exit(EXIT_FAILURE);
     return -1;
 }
@@ -1354,12 +1354,12 @@ void seed_kmer_hash(char *file, int records_to_seed, hash_table_t *ht, int K, in
 //             current_position = i;
 //             if (current_line == line_number)
 //             {
-//                 printf("Line %'zu found at position %zu, data: %c", line_number, current_position, data[i]);
+//                 printf("Line %'zu found at position %'zu, data: %c", line_number, current_position, data[i]);
 //                 return current_position + 1;
 //             }
 //         }
 //     }
-//     printf("ERROR: Line number %zu not found in file\n", line_number);
+//     printf("ERROR: Line number %'zu not found in file\n", line_number);
 //     exit(EXIT_FAILURE);
 //     return (size_t)-1;
 // }
@@ -1450,7 +1450,7 @@ void sequence_to_hash(const char *seq, hash_table_t *hash_table, int *seq_high_c
 
         if (index < 0)
         {
-            fprintf(stderr, "ERROR3: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
+            fprintf(stderr, "ERROR3: This shouldnt have happened, index %'zu hash %'zu capacity %'zu\n", index, hash, hash_table->capacity);
             exit(EXIT_FAILURE);
         }
         if (hash_table->kmer[index].count >= depth_per_cpu)
@@ -1470,7 +1470,7 @@ void sequence_to_hash_zero(const char *seq, hash_table_t *hash_table, int K, int
         char kmer[K + 1];
         strncpy(kmer, seq + i, K);
         kmer[K] = '\0';
-        // printf("length is %zu (%s)\n", strlen(kmer), kmer);
+        // printf("length is %'zu (%s)\n", strlen(kmer), kmer);
 
         uint64_t hash = 0;
 
@@ -1492,7 +1492,7 @@ void sequence_to_hash_zero(const char *seq, hash_table_t *hash_table, int K, int
 
         if (index < 0)
         {
-            fprintf(stderr, "ERROR3: This shouldnt have happened, index %zu hash %zu capacity %zu\n", index, hash, hash_table->capacity);
+            fprintf(stderr, "ERROR3: This shouldnt have happened, index %'zu hash %'zu capacity %'zu\n", index, hash, hash_table->capacity);
             exit(EXIT_FAILURE);
         }
     }
@@ -1814,7 +1814,7 @@ int multithreaded_process_files_paired(thread_data_t *thread_data, mmap_file_t *
             exit(EXIT_FAILURE);
         }
 
-        // printf("forward/reverse size %zu/%zu chunk %s/%s\n", thread_data[i].forward_size, thread_data[i].reverse_size, forward_chunk_end, reverse_chunk_end);
+        // printf("forward/reverse size %'zu/%'zu chunk %s/%s\n", thread_data[i].forward_size, thread_data[i].reverse_size, forward_chunk_end, reverse_chunk_end);
 
         if (cfg.debug > 0)
             printf("Starting thread %d\n", thread_number);
@@ -2117,7 +2117,7 @@ int multithreaded_process_files_single(thread_data_t *thread_data, mmap_file_t *
             exit(EXIT_FAILURE);
         }
 
-        // printf("forward/reverse size %zu/%zu chunk %s/%s\n", thread_data[i].forward_size, thread_data[i].reverse_size, forward_chunk_end, reverse_chunk_end);
+        // printf("forward/reverse size %'zu/%'zu chunk %s/%s\n", thread_data[i].forward_size, thread_data[i].reverse_size, forward_chunk_end, reverse_chunk_end);
 
         if (cfg.debug > 0)
             printf("Starting thread %d\n", thread_number);
