@@ -19,6 +19,7 @@
 // TODO: add advice of kmer size vs memory, for example a k=15 with 16gb ram per hash will produce no collisions.
 // calc 16*4^15/1024^3=16
 // but speed increase is not always obvious as lower k requires more kmers calculated
+// 20240823: this has now been done
 
 // TODO: initiate a table sync when there is no consequence on wait time:
 // when the file is being read to decide where to split it amongst the threads
@@ -199,6 +200,7 @@ typedef struct
 } mmap_file_t;
 
 // Function prototypes
+size_t to_power(size_t base, size_t exp);
 int compare_kmer_count_asc(const void *a, const void *b);
 int compare_kmer_count_desc(const void *a, const void *b);
 void sort_kmer_table(hash_table_t *ht, bool do_desc, int thread_id);
@@ -255,6 +257,19 @@ int multithreaded_process_files_single(thread_data_t *thread_data, mmap_file_t *
 ////////////////////////////////////////////////////////////////
 ////////// HELPER FUNCTIONS ////////////////////////////////////
 ////////////////////////////////////////////////////////////////
+size_t to_power(size_t base, size_t exp)
+{
+    size_t result = 1;
+    while (exp)
+    {
+        if (exp & 1)
+            result *= base;
+        exp >>= 1;
+        base *= base;
+    }
+    return result;
+}
+
 int compare_kmer_asc(const void *a, const void *b)
 {
     kmer_t *kmerA = (kmer_t *)a;
@@ -618,7 +633,8 @@ int parse_arguments(int argc, char *argv[])
     // since we're processing each thread chunk separately.
     cfg.initial_hash_size = (cfg.memory > 0) ? memoryGB2capacity(cfg.memory) : INITIAL_CAPACITY;
     float memory_per_cpu = capacity2memory(cfg.initial_hash_size);
-    printf("Initial hash table size set to %'zu (memory ~ %'0.2f Gb for each of %d threads, ~ %'d Gb total))\n\n", cfg.initial_hash_size, memory_per_cpu, cfg.cpus, cfg.memory);
+    size_t max_slots_for_k = to_power(4, cfg.ksize);
+    printf("Initial hash table size set to %'zu (maximum for k=%d is %'zu); memory ~ %'0.2f Gb for each of %d threads (~ %'d Gb total))\n\n", cfg.initial_hash_size, cfg.ksize, max_slots_for_k, memory_per_cpu, cfg.cpus, cfg.memory);
 
     /////////////////////////////////////////////////////////////////////////
     //////////////      checks       ////////////////////////////////////////
