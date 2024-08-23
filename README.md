@@ -16,30 +16,43 @@ File's statistics: Processed 2,458,692,374, Printed 349,654,749, Skipped 2,109,0
 gcc -o normalise_kmers_multi_large normalise_kmers_multi_large.c -lpthreads
 ```
 
-I will write this at some point, in the meantime here is the helpful help:
-
 ### Usage
 
 ```bash
-
-
                 Mandatory:
                 * --forward|-f file1 [file2+]   List of forward (read1) sequence files
                 * --reverse|-r file1 [file2+]   List of reverse (read2) sequence files
 
                 Optional:
                 [--single|-s] data are single ended, any --forward files not matched with --reverse will be treated as single-end
-                [--ksize|-k (integer 5-32; def. 25)]    Number of what size of K to use (must be between 5 and 32)
+
+                [--ksize|-k (integer 5-32; def. 15)]    Number of what size of K to use (must be between 5 and 32)
+                                                        To capture your data accurately, the value of 4^k should be > genome/transcriptome + any variation + any errors in bp
+                                                        (ie. take log4 of your expected base pairs)
+
                 [--depth|-d (integer; def. 100)]        Number determining when a kmer is tagged as high coverage (defaults to 100),
                                                         must be above 2xCPU count as each CPU calculates depth independently
+
                 [--coverage|-g (float 0-1; def. 0.9)]   Proportion (0-1) of sequence that must be covered by high coverage kmers before tagging as redundant
+
                 [--canonical|-c]                        Flag to ask the program to merge kmers from forward and reverse complement forms (e.g. for DNA-Seq or unstranded RNA-Seq)
+
                 [--filetype|-t (fq|fa; def. fq)]        Whether the input files are fastq or fasta
-                [--outformat|-o (fq|fq; def. fq)]       Whether you want the output files as fastq or fasta (e.g. for Trinity)
-                [--memory_start|-m (integer; def. 1)]   Number in Gb of the total memory the program will initially allocate across all threads. The program may request more memory when needed but very small values will cause it to slow down
+
+                [--outformat|-o (fq|fa; def. fq)]       Whether you want the output files as fastq or fasta (e.g. for Trinity)
+
+                [--memory_start|-m (integer; def. 1)]   Number in Gb of the total memory the program will initially allocate across all threads.
+                                                        The program may request more memory when needed but very small values will cause it to slow down.
+                                                        Each kmer takes 16 bytes of RAM and up to 4^k kmers are expected (i.e. k=15 needs 16gb per CPU).
+
                 [--cpu|-p (int; def 1)]                 Number of CPUs that will process the input files, each file is processed sequentially after distributing to the CPUs
+
                 [--verbose|-e]                          Entertain the user
+
                 [--debug|-b]                            Annoy the developer
+
+                [--print|-P]                            Print out a tab-delimited file of the kmer
+
                 [--version|-v]                          Print version and exit
 
 ```
@@ -69,8 +82,3 @@ Overall processing rate: 121,614 sequences per second
 Input size: 1.4T
 Output size: 162G
 ```
-
-NB to developers: Do not use normalise_kmers_multi. 
-It is an older version that uses a shared kmer table.
-It also needs some bugfixes to be backported to it.
-It is far less performant due to the need to sync kmer tables and the gain is minimal for the large datasets you'd need normalisation for.
