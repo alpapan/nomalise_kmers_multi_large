@@ -301,7 +301,7 @@ void sort_kmer_table(hash_table_t *ht, bool do_desc, int thread_id)
 
 void print_kmer_table(hash_table_t *ht, char *identifier, bool do_desc, int thread_id)
 {
-    sort_kmer_table(ht, do_desc, thread_id);
+    // sort_kmer_table(ht, do_desc, thread_id);
 
     if (cfg.verbose)
     {
@@ -1533,8 +1533,8 @@ void *process_thread_chunk_paired(void *arg)
     data->last_report_time = current_time;
     data->last_report_count = data->processed_count;
 
-    if (cfg.debug)
-        printf("Thread %d started; processing %d lines per record\n", thread_id, lines_to_read);
+    if (cfg.debug > 1)
+        printf("Thread %d started; processing paired files, %d lines per record\n", thread_id, lines_to_read);
 
     // all checks in here may slow down things
     while (forward_pointer < data->forward_data + data->forward_file_end &&
@@ -1883,8 +1883,8 @@ void *process_thread_chunk_single(void *arg)
     data->last_report_time = current_time;
     data->last_report_count = data->processed_count;
 
-    if (cfg.debug)
-        printf("Thread %d started; processing %d lines per record\n", thread_id, lines_to_read);
+    if (cfg.debug > 1)
+        printf("Thread %d started; processing single end file, %d lines per record\n", thread_id, lines_to_read);
 
     // all checks in here may slow down things
     while (forward_pointer < data->forward_data + data->forward_file_end)
@@ -2177,8 +2177,6 @@ int main(int argc, char *argv[])
 
     init_hash_table(&seed_hash);
     int records_to_seed = 1 + (SEED_NUMBER / cfg.forward_file_count);
-
-    print_kmer_table(&seed_hash, "_seeds", true, -1);
 
     for (int file_index = 0; file_index < cfg.forward_file_count; file_index++)
     {
