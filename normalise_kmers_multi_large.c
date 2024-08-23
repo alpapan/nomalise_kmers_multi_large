@@ -664,7 +664,7 @@ int parse_arguments(int argc, char *argv[])
         }
         printf("\n");
     }
-    if (cfg.forward_file_count == 0 || cfg.reverse_file_count == 0)
+    if (cfg.forward_file_count == 0 || (cfg.reverse_file_count == 0 && cfg.singleend == 0))
     {
         fprintf(stderr, "Error: no fwd (%d) or reverse (%d) files provided\n", cfg.forward_file_count, cfg.reverse_file_count);
         return 0;
@@ -1587,8 +1587,6 @@ void *process_thread_chunk_paired(void *arg)
                 break;
             }
         }
-        if (!valid_record)
-            break;
 
         bool process_success = process_sequence_pair(forward_record[1], reverse_record[1], local_hash_table, &seq_high_count_kmers_forward, &total_seq_kmers_forward, &seq_high_count_kmers_reverse, &total_seq_kmers_reverse, thread_id, K, depth_per_cpu);
         if (process_success == false)
@@ -1654,6 +1652,9 @@ void *process_thread_chunk_paired(void *arg)
                    seq_high_count_kmers_forward, seq_high_count_kmers_reverse,
                    total_seq_kmers_forward, total_seq_kmers_reverse,
                    high_count_ratio_fwd, high_count_ratio_rev);
+
+            if (debug > 3)
+                printf("FWD seq: %s\n%s\nREV seq: %s\n%s\n", forward_record[0], forward_record[1], reverse_record[0], reverse_record[1]);
         }
         sequences_processed++;
 
@@ -1691,6 +1692,8 @@ void *process_thread_chunk_paired(void *arg)
             data->last_report_time = current_time;
             data->last_report_count = data->processed_count;
         }
+        if (!valid_record)
+            break;
     }
 
     // chunk finished processing
@@ -1920,7 +1923,7 @@ void *process_thread_chunk_single(void *arg)
         bool valid_record = true;
         int seq_high_count_kmers_forward = 0, total_seq_kmers_forward = 0;
 
-        char forward_record[lines_to_read][MAX_LINE_LENGTH], reverse_record[lines_to_read][MAX_LINE_LENGTH];
+        char forward_record[lines_to_read][MAX_LINE_LENGTH];
 
         // read pair
         for (int i = 0; i < lines_to_read; i++)
@@ -1934,8 +1937,7 @@ void *process_thread_chunk_single(void *arg)
                 break;
             }
         }
-        if (!valid_record)
-            break;
+
         bool process_success = process_sequence_single(forward_record[1], local_hash_table, &seq_high_count_kmers_forward, &total_seq_kmers_forward, thread_id, K, depth_per_cpu);
         if (process_success == false)
             continue;
@@ -1959,10 +1961,6 @@ void *process_thread_chunk_single(void *arg)
             {
                 char forward_record_fasta[MAX_LINE_LENGTH * 2] = {0};
                 fastq_to_fasta(&forward_record, forward_record_fasta, true);
-
-                char reverse_record_fasta[MAX_LINE_LENGTH * 2] = {0};
-                fastq_to_fasta(&reverse_record, reverse_record_fasta, false);
-                fprintf(output_forward, "%s", forward_record_fasta);
             }
             else
             {
@@ -1997,6 +1995,9 @@ void *process_thread_chunk_single(void *arg)
                    seq_high_count_kmers_forward,
                    total_seq_kmers_forward,
                    high_count_ratio_fwd);
+
+            if (debug > 3)
+                printf("FWD seq: %s\n%s\n", forward_record[0], forward_record[1]);
         }
         sequences_processed++;
 
@@ -2034,6 +2035,9 @@ void *process_thread_chunk_single(void *arg)
             data->last_report_time = current_time;
             data->last_report_count = data->processed_count;
         }
+
+        if (!valid_record)
+            break;
     }
 
     // chunk finished processing
