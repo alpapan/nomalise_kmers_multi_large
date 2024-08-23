@@ -1647,7 +1647,7 @@ void *process_thread_chunk_paired(void *arg)
             {
                 printf("Thread %d - Sequence pair %'zu SKIPPED: ", thread_id, data->processed_count);
             }
-            printf("High (%d) count kmers: F:%d;R:%d, Total unique kmers: F:%d;R:%d High count ratio: F:%.2f;R:%.2f\n",
+            printf("High (%d) count kmers: F:%d;R:%d, Total kmers: F:%d;R:%d High count ratio: F:%.2f;R:%.2f\n",
                    depth_per_cpu,
                    seq_high_count_kmers_forward, seq_high_count_kmers_reverse,
                    total_seq_kmers_forward, total_seq_kmers_reverse,
@@ -1863,9 +1863,6 @@ int multithreaded_process_files_paired(thread_data_t *thread_data, mmap_file_t *
         total_printed += thread_data[thread_number].printed_count;
         total_skipped += thread_data[thread_number].skipped_count;
         max_total_kmers_in_threads = (max_total_kmers_in_threads < thread_data[thread_number].hash_table->used) ? thread_data[thread_number].hash_table->used : max_total_kmers_in_threads;
-
-        if (cfg.doprint)
-            print_kmer_table(thread_data[thread_number].hash_table, "", true, thread_number);
     }
     reporting.total_processed = total_processed;
     reporting.total_printed = total_printed;
@@ -1990,7 +1987,7 @@ void *process_thread_chunk_single(void *arg)
             {
                 printf("Thread %d - Sequence pair %'zu SKIPPED: ", thread_id, data->processed_count);
             }
-            printf("High (%d) count kmers: F:%d, Total unique kmers: F:%d High count ratio: F:%.2f\n",
+            printf("High (%d) count kmers: F:%d, Total kmers: F:%d High count ratio: F:%.2f\n",
                    depth_per_cpu,
                    seq_high_count_kmers_forward,
                    total_seq_kmers_forward,
@@ -2165,9 +2162,6 @@ int multithreaded_process_files_single(thread_data_t *thread_data, mmap_file_t *
         total_printed += thread_data[thread_number].printed_count;
         total_skipped += thread_data[thread_number].skipped_count;
         max_total_kmers_in_threads = (max_total_kmers_in_threads < thread_data[thread_number].hash_table->used) ? thread_data[thread_number].hash_table->used : max_total_kmers_in_threads;
-
-        if (cfg.doprint)
-            print_kmer_table(thread_data[thread_number].hash_table, "", true, thread_number);
     }
     reporting.total_processed = total_processed;
     reporting.total_printed = total_printed;
@@ -2372,6 +2366,10 @@ int main(int argc, char *argv[])
             fclose(thread_data[thread_number].thread_output_reverse);
             free(thread_data[thread_number].thread_output_reverse_filename);
         }
+
+        if (cfg.doprint)
+            print_kmer_table(thread_data[thread_number].hash_table, "", true, thread_number);
+
         free(thread_data[thread_number].hash_table->kmer);
         free(thread_data[thread_number].hash_table);
     }
@@ -2383,7 +2381,7 @@ int main(int argc, char *argv[])
     printf("Cumulative Max unique kmers in any thread: %'zu\n", reporting.max_total_kmers);
 
     // we can't get this if we have multiple threads unless we merge the tables, is it worth it?
-    //    printf("Total unique kmers across all sequences: %'zu\n", reporting.total_kmers);
+    //    printf("Total kmers across all sequences: %'zu\n", reporting.total_kmers);
 
 cleanup:
 
