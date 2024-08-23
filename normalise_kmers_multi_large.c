@@ -634,6 +634,11 @@ int parse_arguments(int argc, char *argv[])
     cfg.initial_hash_size = (cfg.memory > 0) ? memoryGB2capacity(cfg.memory) : INITIAL_CAPACITY;
     float memory_per_cpu = capacity2memory(cfg.initial_hash_size);
     size_t max_slots_for_k = to_power(4, cfg.ksize);
+    if (max_slots_for_k < cfg.initial_hash_size)
+    {
+        cfg.initial_hash_size = max_slots_for_k;
+        memory_per_cpu = capacity2memory(cfg.initial_hash_size);
+    }
     printf("Initial hash table size set to %'zu (maximum for k=%d is %'zu); memory ~ %'0.2f Gb for each of %d threads (~ %'d Gb total))\n\n", cfg.initial_hash_size, cfg.ksize, max_slots_for_k, memory_per_cpu, cfg.cpus, cfg.memory);
 
     /////////////////////////////////////////////////////////////////////////
