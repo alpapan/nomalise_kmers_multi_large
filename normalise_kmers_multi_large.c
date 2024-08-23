@@ -16,10 +16,22 @@
 // DONE: support single end data
 // 20240822: this has now been done
 
-// TODO: add advice of kmer size vs memory, for example a k=15 with 16gb ram per hash will produce no collisions.
+// DONE: add advice of kmer size vs memory, for example a k=15 with 16gb ram per hash will produce no collisions.
 // calc 16*4^15/1024^3=16
 // but speed increase is not always obvious as lower k requires more kmers calculated
 // 20240823: this has now been done
+
+// [x] - AP 20240821 TODO: remove redundant and debugging code
+// [x] - 20240821 i attempted to integrated a job queue system but then realised it wouldn't actually improve performance;
+//        file is still wholly read while converting records to bytes and sending them to the queue.
+//        it would only help if the file was not memory mapped as it wouldn't need to store data in memory. but with mmap there is no benefit?
+// [ ] - 20240821 support gz bz2 input will be hard because of mmapped record boundaries, only solution would be to create a temp file?
+// [ ] - 20240821 support streaming gz output will be easier but streaming bz2 not possible (unless compress at the end but then what's the point)?
+
+// TODO: allow user to provide a tsv of kmers (one per line, count is not relevant) to use as a seed.
+// for example the output of a previous run or another program such meryl
+// better seed tables mean the threads will run much faster as they won't have to resolve
+// the same collisions more than once.
 
 // TODO: initiate a table sync when there is no consequence on wait time:
 // when the file is being read to decide where to split it amongst the threads
@@ -48,12 +60,6 @@
 #include <getopt.h>
 #include <stdbool.h>
 
-// [ ] - AP 20240821 TODO: remove redundant and debugging code
-// [x] - i attempted to integrated a job queue system but then realised it wouldn't actually improve performance;
-//        file is still wholly read while converting records to bytes and sending them to the queue.
-//        it would only help if the file was not memory mapped as it wouldn't need to store data in memory. but with mmap there is no benefit?
-// [ ] - support gz bz2 input will be hard because of mmapped record boundaries, only solution would be to create a temp file?
-// [ ] - support streaming gz output will be easier but streaming bz2 not possible (unless compress at the end but then what's the point)?
 
 //////// HELPERS
 
@@ -957,17 +963,25 @@ size_t store_kmer(hash_table_t *hash_table, uint64_t hash, int thread_id, bool d
         while (hash_table->kmer[index].hash != 0 && hash_table->kmer[index].hash != hash)
         {
             collisions++;
-            if (cfg.debug > 4)
-                printf("Thread %d: hash %'zu collision consecutive number %d, index: %'zu -> %'zu, capacity %'zu\n", thread_id, hash, collisions, original_index, index, hash_table->capacity);
-
             if ((collisions / hash_table->capacity) > (hash_table->capacity * 0.5))
             {
                 if (cfg.debug)
                     printf("Thread %d: Collisions more than 10%% of table capacity, expanding table...\n", thread_id);
                 expand_local_hash_table(hash_table, 0, thread_id);
             }
+            // linear
+            // index = (index + 1) % hash_table->capacity;
 
-            index = (index + 1) % hash_table->capacity;
+            // quadratic
+            index = (index + (collisions * collisions)) % hash_table->capacity;
+
+            // another idea is to use chaining, ie. storing in a list those that have the same index
+
+            // original idea was to split the tables to say 4 of them
+
+            if (cfg.debug > 4)
+                printf("Thread %d: hash %'zu collision consecutive number %d, index: %'zu -> %'zu, capacity %'zu\n", thread_id, hash, collisions, original_index, index, hash_table->capacity);
+
             if (index < 0)
             {
                 fprintf(stderr, "ERROR1: This shouldnt have happened, index %'zu hash %'zu capacity %'zu\n", index, hash, hash_table->capacity);
