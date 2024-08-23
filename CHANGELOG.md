@@ -1,4 +1,5 @@
 ```
+20240823: coverage is less than rather than less than equals (so we can remove identical ones using --coverage 1)
 20240823: help updated
 20240823: default k=15
 20240823: kmer table can be printed with -P

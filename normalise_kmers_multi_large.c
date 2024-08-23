@@ -1607,8 +1607,8 @@ void *process_thread_chunk_paired(void *arg)
 
         bool is_printed = false;
         // options
-        if (high_count_ratio_fwd <= coverage && high_count_ratio_rev <= coverage)
-        // if (high_count_ratio_pair <= coverage) // this skips fewer sequences, which is a tad surprising.
+        if (high_count_ratio_fwd < coverage && high_count_ratio_rev < coverage)
+        // if (high_count_ratio_pair < coverage) // this skips fewer sequences, which is a tad surprising.
         {
             if (is_input_fastq == true && is_output_fastq == false)
             {
@@ -1952,8 +1952,8 @@ void *process_thread_chunk_single(void *arg)
 
         bool is_printed = false;
         // options
-        if (high_count_ratio_fwd <= coverage)
-        // if (high_count_ratio_pair <= coverage) // this skips fewer sequences, which is a tad surprising.
+        if (high_count_ratio_fwd < coverage)
+        // if (high_count_ratio_pair < coverage) // this skips fewer sequences, which is a tad surprising.
         {
             if (is_input_fastq == true && is_output_fastq == false)
             {
