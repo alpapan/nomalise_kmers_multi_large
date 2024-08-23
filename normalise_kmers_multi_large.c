@@ -475,6 +475,7 @@ void print_usage()
                     "\n\n\t\t[--cpu|-p (int; def 1)]\t\t\tNumber of CPUs that will process the input files, each file is processed sequentially after distributing to the CPUs"
                     "\n\n\t\t[--verbose|-e]\t\t\t\tEntertain the user"
                     "\n\n\t\t[--debug|-b]\t\t\t\tAnnoy the developer"
+                    "\n\n\t\t[--print|-P]\t\t\t\tPrint out a tab-delimited file of the kmers counts"
                     "\n\n\t\t[--version|-v]\t\t\t\tPrint version and exit"
                     "\n\n\n");
 }
