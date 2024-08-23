@@ -683,13 +683,6 @@ int parse_arguments(int argc, char *argv[])
         fprintf(stderr, "Error: Depth (%d) must be at least 2 x number of CPUs (for performance reasons; but this version of the program is written to normalise to 50+\n", cfg.depth);
         return 0;
     }
-
-    if (cfg.initial_hash_size < 100000)
-    {
-        fprintf(stderr, "Error: initial kmer table size is too small (%'zu), it should be set to at least 100000 (or leave empty for default)\n", cfg.initial_hash_size);
-        return 0;
-    }
-
     return 1;
 }
 
