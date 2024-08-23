@@ -31,27 +31,6 @@
 // TODO: provide advice that two rounds of normalisations may be better especially if have lots of files.
 // split the work into two sets between two computers and then run it a second time with more stringent --coverage
 
-// TODO: some peculiar behaviour found after double processin
-// i used 10 threads and --coverage 0.96 and then 0.98 to process 3.4Tb -> 500 Gb ->
-// the second round's thread 0 and 1 found quite a bit of redundancy (0 was 33% and 1 was 15%) but not other threads.
-// more concerning is that the number of unique kmers were much lower in thread0/1.
-// i have no idea why this could be so since each thread is independent processing a portion of a file:
-//
-// Thread 0 - Processing rate: 17,950 (+0.00%) sequences/s, processed 16,676,541 pairs, printed: 9,807,759 (+2.81%), skipped: 6,868,782 (+13.34%), Unique kmers (all sequences; this thread): 145,068,177 (+2.06%)
-// Thread 1 - Processing rate: 17,042 (+0.00%) sequences/s, processed 16,622,086 pairs, printed: 12,601,054 (+3.37%), skipped: 4,021,032 (+17.93%), Unique kmers (all sequences; this thread): 187,553,106 (+2.31%)
-// Thread 2 - Processing rate: 15,679 (+0.00%) sequences/s, processed 16,540,264 pairs, printed: 15,043,236 (+4.45%), skipped: 1,497,028 (+25.07%), Unique kmers (all sequences; this thread): 240,241,727 (+2.10%)
-// Thread 3 - Processing rate: 15,229 (+0.00%) sequences/s, processed 16,513,297 pairs, printed: 15,889,814 (+5.36%), skipped: 623,483 (+20.21%), Unique kmers (all sequences; this thread): 274,340,123 (+2.52%)
-// Thread 4 - Processing rate: 15,551 (+0.00%) sequences/s, processed 16,532,616 pairs, printed: 15,526,649 (+5.15%), skipped: 1,005,967 (+20.71%), Unique kmers (all sequences; this thread): 274,321,928 (+2.79%)
-// Thread 5 - Processing rate: 16,315 (+0.00%) sequences/s, processed 16,578,460 pairs, printed: 16,331,745 (+5.93%), skipped: 246,715 (+35.79%), Unique kmers (all sequences; this thread): 294,211,911 (+2.77%)
-// Thread 6 - Processing rate: 16,117 (+0.00%) sequences/s, processed 16,566,560 pairs, printed: 16,290,330 (+6.07%), skipped: 276,230 (+14.73%), Unique kmers (all sequences; this thread): 305,058,106 (+2.96%)
-// Thread 7 - Processing rate: 15,301 (+0.00%) sequences/s, processed 16,517,591 pairs, printed: 16,427,108 (+5.84%), skipped: 90,483 (+13.79%), Unique kmers (all sequences; this thread): 324,452,671 (+2.58%)
-// Thread 8 - Processing rate: 15,645 (+0.00%) sequences/s, processed 16,538,238 pairs, printed: 16,508,447 (+5.96%), skipped: 29,791 (+46.80%), Unique kmers (all sequences; this thread): 332,330,298 (+2.76%)
-// Thread 9 - Processing rate: 16,930 (+0.00%) sequences/s, processed 16,615,328 pairs, printed: 16,580,786 (+6.45%), skipped: 34,542 (+44.09%), Unique kmers (all sequences; this thread): 330,700,470 (+2.99%)
-// this only happens for files produced by the later threads... what is different between threads except file coordinates?
-// and it's only to do with the output, not input
-//
-//
-
 /////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////
 
@@ -104,7 +83,7 @@
 #define CHUNK_SIZE 1e6
 #define MAX_THREADS 256
 #define TABLE_LOAD_FACTOR 0.8
-#define MAX_K 32
+#define MAX_K 31
 #define REPORTING_INTERVAL 60 // seconds
 #define SEED_NUMBER 3e6
 
@@ -460,7 +439,7 @@ void print_usage()
                     "\n\t\t* --reverse|-r file1 [file2+]\tList of reverse (read2) sequence files"
                     "\n\n\t\tOptional:"
                     "\n\t\t[--single|-s] data are single ended, any --forward files not matched with --reverse will be treated as single-end"
-                    "\n\n\t\t[--ksize|-k (integer 5-32; def. 15)]\tNumber of what size of K to use (must be between 5 and 32)"
+                    "\n\n\t\t[--ksize|-k (integer 5-31; def. 15)]\tNumber of what size of K to use (must be between 5 and 31)"
                     "\n\t\t\t\t\t\t\tTo capture your data accurately, the value of 4^k should be > genome/transcriptome + any variation + any errors in bp"
                     "\n\t\t\t\t\t\t\t(ie. take log4 of your expected base pairs)"
                     "\n\n\t\t[--depth|-d (integer; def. 100)]\tNumber determining when a kmer is tagged as high coverage (defaults to 100),"
@@ -684,9 +663,9 @@ int parse_arguments(int argc, char *argv[])
         fprintf(stderr, "Error: CPU count (%d) must be a positive integer and up to %d\n", cfg.cpus, MAX_THREADS);
         return 0;
     }
-    if (cfg.ksize < 5 || cfg.ksize > 32)
+    if (cfg.ksize < 5 || cfg.ksize > 31)
     {
-        fprintf(stderr, "Error: Only kmer sizes (%d) of 5 to 32 are supported\n", cfg.ksize);
+        fprintf(stderr, "Error: Only kmer sizes (%d) of 5 to 31 are supported\n", cfg.ksize);
         return 0;
     }
     if (cfg.coverage > 1 || cfg.coverage < 0.001)
