@@ -21,25 +21,74 @@
 // but speed increase is not always obvious as lower k requires more kmers calculated
 // 20240823: this has now been done
 
+////////////// i/o
+// 20290828 TODO TOTHINK: print out a merged kmer table after sorting and potentially postprocessing, reducing memory
+//           alternatively, and probably better, make a second software that does that from the thread outputs
+//          TODO TOTHINK: implement a capability to keep a read pair which is over-represented. Could be hashed with a larger
+//           kmer such as 60, this would be seeded after a read has been classified as over-represented; Alternatively, a second
+//           table for only those that have more than x collisions (3?), it would need not be very large, and it could be stored
+//           as modulo
+//
+//
+//////////////
+
+////////////// i/o
 // [x] - AP 20240821 TODO: remove redundant and debugging code
 // [x] - 20240821 i attempted to integrated a job queue system but then realised it wouldn't actually improve performance;
 //        file is still wholly read while converting records to bytes and sending them to the queue.
 //        it would only help if the file was not memory mapped as it wouldn't need to store data in memory. but with mmap there is no benefit?
 // [ ] - 20240821 support gz bz2 input will be hard because of mmapped record boundaries, only solution would be to create a temp file?
 // [ ] - 20240821 support streaming gz output will be easier but streaming bz2 not possible (unless compress at the end but then what's the point)?
+//////////////////////
 
+///////////// improve accuracy
+// TODO: When a change occurs at the ends of a sequence (<k)
+// the ratio is different than when it occurs in the middle:
+// there is a deficit of kmers to scan.
+// so if k is 15, first and last 14 nucleotides will be under represented. we need some kind if weights
+// the idea im having is to somehow circularise but then wed need code changes to avoid influencing the counts
+// the simpler solution is to count end kmer ratios separatetely: one for the (k-1)*2 nucs at the ends, and one for the seq_len-(k-1)*2 nucs in the middle
+// the end ratio will have tio weighted: the first nucleotide would be covered by 1 kmer only
+// but how to implement such weights?
+// Thread 0 - Sequence pair 1 PRINTED: High (2) count kmers: F:0, Total unique kmers: F:73 High count ratio: F:0.00
+// FWD seq
+// GATGATGCTGATTCTGTCGAAGCAAGCTATAGTATGCACTATCAGAATGCATTGACGATGCCTGTCGACTGGCTCCCAAATCCCACG
+//
+// Thread 0 - Sequence pair 2 SKIPPED: High (2) count kmers: F:73, Total unique kmers: F:73 High count ratio: F:1.00
+// FWD seq clone
+// GATGATGCTGATTCTGTCGAAGCAAGCTATAGTATGCACTATCAGAATGCATTGACGATGCCTGTCGACTGGCTCCCAAATCCCACG
+// 
+// Thread 0 - Sequence pair 3 PRINTED: High (2) count kmers: F:70, Total unique kmers: F:73 High count ratio: F:0.96
+// FWD seq clone diff end
+// GATGATGCTGATTCTGTCGAAGCAAGCTATAGTATGCACTATCAGAATGCATTGACGATGCCTGTCGACTGGCTCCCAAATCCCcCG
+// 
+// Thread 0 - Sequence pair 4 PRINTED: High (2) count kmers: F:58, Total unique kmers: F:73 High count ratio: F:0.79
+// FWD seq clone diff middle
+// GATGATGCTGATTCTGTCGAAGCAAGCTATAGTATGCACTAaCAGAATGCATTGACGATGCCTGTCGACTGGCTCCCAAATCCCACG
+////////////////////////
+
+/////////// improve collision handling:
 // TODO: allow user to provide a tsv of kmers (one per line, count is not relevant) to use as a seed.
 // for example the output of a previous run or another program such meryl
 // better seed tables mean the threads will run much faster as they won't have to resolve
 // the same collisions more than once.
-
+//
 // TODO: initiate a table sync when there is no consequence on wait time:
 // when the file is being read to decide where to split it amongst the threads
+//
+// TODO: every species has a unique kmer spectrum,
+// which is why seeding works so well with largr k
+// so what im thinking is to investigate if there is clustering based on
+// sample of input.  at the very least get a histogram of collisions
+// and a map of occupied indexes. no idea how given the number of
+// possible indexes with large Ks.
+/////////////////////////
 
+////////////////////////// manual
 // TODO: provide advice that input data should be adaptor/quality trimmed
 // noting that i haven't tested that (and non-trimmed files will be faster to process
 // due to fwd/rev file sizes/record boundaries being identical).
-
+//
 // TODO: provide advice that two rounds of normalisations may be better especially if have lots of files.
 // split the work into two sets between two computers and then run it a second time with more stringent --coverage
 
