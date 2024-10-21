@@ -24,12 +24,15 @@
 ////////////// i/o
 // 20290828 TODO TOTHINK: print out a merged kmer table after sorting and potentially postprocessing, reducing memory
 //           alternatively, and probably better, make a second software that does that from the thread outputs
+//
 //          TODO TOTHINK: implement a capability to keep a read pair which is over-represented. Could be hashed with a larger
 //           kmer such as 60, this would be seeded after a read has been classified as over-represented; Alternatively, a second
 //           table for only those that have more than x collisions (3?), it would need not be very large, and it could be stored
-//           as modulo
-//
-//
+//           as modulo. instead of using a large k, we could also do non-overlapping kmers since the read's identity would be the
+//           average of the non-overlapping kmers. i would skip the first and last k.
+//            
+//           TODO TOTHINK: could reduce collisions by implementing a round-robin (but I will need to track the number of collisions; 
+//            which I could use 8-bit integers for that 
 //////////////
 
 ////////////// i/o
@@ -153,7 +156,7 @@ static const char rev_base_map[4] = {'A', 'C', 'G', 'T'};
 // 16 (8+4+4padding) bytes per entry
 typedef struct
 {
-    uint64_t hash;
+    uint64_t hash; // 
     int count;
 } kmer_t;
 
